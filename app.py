@@ -1,10 +1,12 @@
+
 from pathlib import Path
 from datetime import datetime
+import inspect
 import json
-import traceback
+import sys
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from app.rag_pipeline import RAGPipeline
 
@@ -14,7 +16,7 @@ from app.rag_pipeline import RAGPipeline
 # =========================================================
 
 st.set_page_config(
-    page_title="Project Intelligence | AI Risk Advisor",
+    page_title="AI Project Intelligence & Risk Advisor",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -22,7 +24,7 @@ st.set_page_config(
 
 
 # =========================================================
-# 2. PROJECT PATHS
+# 2. PATHS AND DIRECTORY SETUP
 # =========================================================
 
 ROOT = Path(__file__).resolve().parent
@@ -31,57 +33,33 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 CHROMA_DIR = DATA_DIR / "chroma_db"
 
 
-# =========================================================
-# 3. SAFE DIRECTORY INITIALIZATION
-# =========================================================
-
-def ensure_directory(folder: Path):
-    """
-    Create a directory if it does not exist.
-    Report a clear error if a file occupies the required path.
-    """
-    if folder.exists() and not folder.is_dir():
+def ensure_directory(path: Path):
+    """Create a directory, but never replace a conflicting file."""
+    if path.exists() and not path.is_dir():
         raise NotADirectoryError(
-            f"The path exists as a FILE, but a folder is required:\n{folder}\n\n"
-            "Rename or move the conflicting file, then restart the app."
+            f"A file exists where a folder is required:\n{path}\n"
+            "Rename or move the file before restarting the application."
         )
 
-    folder.mkdir(parents=True, exist_ok=True)
-
-    if not folder.is_dir():
-        raise OSError(f"Could not create or access directory: {folder}")
+    path.mkdir(parents=True, exist_ok=True)
 
 
 try:
     ensure_directory(DATA_DIR)
     ensure_directory(UPLOAD_DIR)
     ensure_directory(CHROMA_DIR)
-
 except Exception as exc:
     st.error("Could not initialize the project folders.")
-
-    st.markdown("### Diagnostic information")
     st.code(f"{type(exc).__name__}: {exc}")
-
-    st.markdown("### Expected project folders")
-    st.code(
-        f"{DATA_DIR}\n"
-        f"{UPLOAD_DIR}\n"
-        f"{CHROMA_DIR}"
+    st.info(
+        "Check the paths above in File Explorer. Do not delete your "
+        "existing ChromaDB data to resolve a folder conflict."
     )
-
-    st.warning(
-        "Open these paths in Windows File Explorer. "
-        "If a file exists where a folder is required, rename or move "
-        "that file instead of deleting it. Do not delete your ChromaDB "
-        "folder if it contains indexed data."
-    )
-
     st.stop()
 
 
 # =========================================================
-# 4. CUSTOM STYLING
+# 3. STYLING
 # =========================================================
 
 st.markdown(
@@ -89,10 +67,7 @@ st.markdown(
     <style>
     .stApp {
         background: linear-gradient(
-            145deg,
-            #08111f 0%,
-            #0b1526 48%,
-            #111c31 100%
+            145deg, #08111f 0%, #0b1526 50%, #111c31 100%
         );
         color: #edf3ff;
     }
@@ -120,13 +95,12 @@ st.markdown(
     }
 
     .hero h1 {
-        font-size: 2.25rem;
-        margin-bottom: 8px;
+        font-size: 2.15rem;
         color: #f8fafc;
+        margin-bottom: 8px;
     }
 
     .hero p {
-        font-size: 1.02rem;
         color: #cbd5e1;
         margin-bottom: 0;
     }
@@ -156,20 +130,11 @@ st.markdown(
         color: #cbd5e1;
     }
 
-    .small-muted {
-        color: #94a3b8;
-        font-size: 0.88rem;
-    }
-
     div[data-testid="stMetric"] {
         background: rgba(15, 23, 42, 0.78);
         border: 1px solid rgba(148, 163, 184, 0.18);
-        padding: 17px;
+        padding: 15px;
         border-radius: 15px;
-    }
-
-    div[data-testid="stMetricLabel"] {
-        color: #cbd5e1;
     }
 
     div[data-testid="stMetricValue"] {
@@ -179,12 +144,6 @@ st.markdown(
     .stButton > button {
         border-radius: 10px;
         font-weight: 600;
-    }
-
-    [data-testid="stFileUploader"] {
-        background: rgba(15, 23, 42, 0.45);
-        border-radius: 12px;
-        padding: 12px;
     }
 
     hr {
@@ -197,35 +156,89 @@ st.markdown(
 
 
 # =========================================================
-# 5. SESSION STATE
+# 4. SESSION STATE
 # =========================================================
 
-if "indexed_files" not in st.session_state:
-    st.session_state.indexed_files = []
+DEFAULT_STATE = {
+    "search_history": [],
+    "last_answer": None,
+    "last_query": "",
+    "risk_findings": None,
+    "risk_totals": {},
+}
 
-if "search_history" not in st.session_state:
-    st.session_state.search_history = []
-
-if "last_answer" not in st.session_state:
-    st.session_state.last_answer = None
-
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
+for key, default_value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = default_value
 
 
 # =========================================================
-# 6. PIPELINE INITIALIZATION
+# 5. PIPELINE INITIALIZATION
 # =========================================================
 
 @st.cache_resource(show_spinner=False)
 def get_pipeline():
     """
-    Reuse one RAG pipeline during the Streamlit session.
+    Pass only constructor arguments supported by the installed
+    RAGPipeline class.
+
+    If the constructor has required arguments with different names,
+    inspect app/rag_pipeline.py and add their names to the mapping.
     """
-    return RAGPipeline(
-        upload_dir=str(UPLOAD_DIR),
-        chroma_dir=str(CHROMA_DIR),
+    signature = inspect.signature(RAGPipeline)
+    parameters = signature.parameters
+
+    argument_values = {
+        "upload_dir": str(UPLOAD_DIR),
+        "upload_path": str(UPLOAD_DIR),
+        "uploads_dir": str(UPLOAD_DIR),
+        "chroma_dir": str(CHROMA_DIR),
+        "persist_directory": str(CHROMA_DIR),
+        "persist_dir": str(CHROMA_DIR),
+        "db_path": str(CHROMA_DIR),
+        "persist_path": str(CHROMA_DIR),
+        "collection_path": str(CHROMA_DIR),
+    }
+
+    accepts_extra_keywords = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in parameters.values()
     )
+
+    if accepts_extra_keywords:
+        return RAGPipeline(
+            upload_dir=str(UPLOAD_DIR),
+            chroma_dir=str(CHROMA_DIR),
+        )
+
+    kwargs = {
+        name: argument_values[name]
+        for name in parameters
+        if name in argument_values
+    }
+
+    # Identify required constructor arguments we cannot supply.
+    missing = [
+        name
+        for name, parameter in parameters.items()
+        if name not in kwargs
+        and parameter.default is inspect.Parameter.empty
+        and parameter.kind
+        not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+    ]
+
+    if missing:
+        raise TypeError(
+            "RAGPipeline requires constructor argument(s) that this "
+            "app cannot identify automatically: "
+            + ", ".join(missing)
+            + ". Check app/rag_pipeline.py."
+        )
+
+    return RAGPipeline(**kwargs)
 
 
 def get_pipeline_safely():
@@ -235,24 +248,22 @@ def get_pipeline_safely():
         st.error("The AI search pipeline could not be initialized.")
         st.code(f"{type(exc).__name__}: {exc}")
         st.info(
-            "Check app/rag_pipeline.py and requirements.txt. "
-            "The first model initialization may also require downloading "
-            "the embedding model."
+            "The exact constructor and its defaults are defined in "
+            "app/rag_pipeline.py. If required arguments are reported, "
+            "match them to that file."
         )
         return None
 
 
+# =========================================================
+# 6. GENERAL UTILITIES
+# =========================================================
+
 def list_uploaded_files():
-    """
-    List files saved in the upload directory.
-    """
     try:
         return sorted(
-            [
-                path for path in UPLOAD_DIR.iterdir()
-                if path.is_file()
-            ],
-            key=lambda path: path.stat().st_mtime,
+            [p for p in UPLOAD_DIR.iterdir() if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
     except OSError:
@@ -260,109 +271,188 @@ def list_uploaded_files():
 
 
 def human_size(size_bytes):
-    """
-    Convert bytes into a readable size.
-    """
     size = float(size_bytes)
 
-    for unit in ["B", "KB", "MB", "GB"]:
-        if size < 1024 or unit == "GB":
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
             return f"{size:.1f} {unit}"
         size /= 1024
 
-    return f"{size:.1f} GB"
+    return f"{size:.1f} TB"
 
 
-def extract_result_text(result):
-    """
-    Normalize common RAG result formats into displayable text.
-    """
+def unique_upload_path(filename):
+    """Avoid overwriting an existing upload with the same filename."""
+    safe_name = Path(filename).name
+
+    if not safe_name or safe_name in {".", ".."}:
+        raise ValueError("Invalid uploaded filename.")
+
+    destination = UPLOAD_DIR / safe_name
+
+    if not destination.exists():
+        return destination
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return destination.with_name(
+        f"{destination.stem}_{timestamp}{destination.suffix}"
+    )
+
+
+def normalize_result(result):
     if result is None:
-        return "No answer was returned."
+        return "No result was returned."
 
     if isinstance(result, str):
         return result
 
     if isinstance(result, dict):
-        for key in ["answer", "response", "result", "text"]:
-            if result.get(key):
+        for key in ("answer", "response", "result", "text"):
+            if result.get(key) is not None:
                 return str(result[key])
 
         return json.dumps(result, indent=2, default=str)
 
+    if isinstance(result, list):
+        return "\n\n".join(str(item) for item in result)
+
     return str(result)
 
 
-def run_semantic_search(pipeline, query, top_k):
+def call_with_supported_arguments(method, query, top_k=None):
     """
-    Call a compatible search method exposed by RAGPipeline.
+    Call a pipeline method using recognized argument names.
+    """
+    signature = inspect.signature(method)
+    params = signature.parameters
 
-    This adapter supports common method names. If your pipeline uses a
-    different method signature, the error will be displayed on screen.
-    """
-    candidate_methods = [
+    kwargs = {}
+
+    query_names = (
+        "query", "question", "text", "user_query", "search_query"
+    )
+    top_k_names = ("top_k", "k", "n_results", "num_results")
+
+    query_parameter = next(
+        (name for name in query_names if name in params),
+        None,
+    )
+
+    top_k_parameter = next(
+        (name for name in top_k_names if name in params),
+        None,
+    )
+
+    if query_parameter:
+        kwargs[query_parameter] = query
+    elif any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in params.values()
+    ):
+        kwargs["query"] = query
+    else:
+        # Use the first positional argument if the method has one.
+        positional = [
+            p for p in params.values()
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if not positional:
+            raise TypeError(
+                f"Cannot identify the query argument for {method.__name__}."
+            )
+        kwargs[positional[0].name] = query
+
+    if top_k is not None and top_k_parameter:
+        kwargs[top_k_parameter] = top_k
+
+    return method(**kwargs)
+
+
+def run_semantic_search(pipeline, query, top_k):
+    method_names = (
         "query",
         "search",
         "ask",
         "query_documents",
         "search_documents",
-    ]
+        "search_similar",
+    )
 
-    for method_name in candidate_methods:
-        method = getattr(pipeline, method_name, None)
+    for name in method_names:
+        method = getattr(pipeline, name, None)
 
         if callable(method):
-            try:
-                return method(query, top_k=top_k)
-            except TypeError:
-                try:
-                    return method(query)
-                except TypeError:
-                    continue
+            return call_with_supported_arguments(
+                method, query, top_k
+            )
 
     raise AttributeError(
-        "No compatible search method was found in RAGPipeline. "
-        "Expected one of: query, search, ask, query_documents, "
-        "search_documents."
+        "No supported search method was found in RAGPipeline. "
+        "Check the method names in app/rag_pipeline.py."
     )
 
 
-def run_document_ingestion(pipeline, saved_path):
-    """
-    Find a compatible ingestion method on RAGPipeline.
-    """
-    candidate_methods = [
+def run_document_ingestion(pipeline, file_path):
+    method_names = (
         "ingest_file",
         "add_document",
         "process_file",
         "ingest_document",
         "index_file",
         "add_file",
-    ]
+        "ingest",
+        "add_documents",
+    )
 
-    for method_name in candidate_methods:
-        method = getattr(pipeline, method_name, None)
+    for name in method_names:
+        method = getattr(pipeline, name, None)
 
-        if callable(method):
-            try:
-                return method(str(saved_path))
-            except TypeError:
-                continue
+        if not callable(method):
+            continue
+
+        signature = inspect.signature(method)
+        params = signature.parameters
+
+        path_names = (
+            "file_path", "path", "filepath", "document_path",
+            "source_path", "file",
+        )
+
+        path_parameter = next(
+            (key for key in path_names if key in params),
+            None,
+        )
+
+        if path_parameter:
+            return method(**{path_parameter: str(file_path)})
+
+        positional = [
+            p for p in params.values()
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+
+        if positional:
+            return method(str(file_path))
 
     raise AttributeError(
-        "No compatible document-ingestion method was found in "
-        "RAGPipeline. Check app/rag_pipeline.py for its ingestion method."
+        "No supported document-ingestion method was found in "
+        "RAGPipeline. Check app/rag_pipeline.py."
     )
 
 
 # =========================================================
-# 7. SIDEBAR NAVIGATION
+# 7. SIDEBAR AND HEADER
 # =========================================================
 
 with st.sidebar:
     st.markdown("## 🧠 Project Intelligence")
     st.caption("AI-powered project knowledge and risk analysis")
-
     st.divider()
 
     page = st.radio(
@@ -374,28 +464,13 @@ with st.sidebar:
             "Risk Signals",
             "System Diagnostics",
         ],
-        index=0,
     )
 
     st.divider()
-
-    st.markdown("### Project status")
-
-    current_files = list_uploaded_files()
-
-    st.metric("Stored documents", len(current_files))
-
+    st.metric("Stored documents", len(list_uploaded_files()))
     st.caption("Local embeddings • ChromaDB • Streamlit")
-
     st.divider()
-
     st.caption("Infosys Springboard Internship Project")
-    st.caption("AI Project Intelligence & Risk Advisor")
-
-
-# =========================================================
-# 8. SHARED HEADER
-# =========================================================
 
 st.markdown(
     """
@@ -404,7 +479,7 @@ st.markdown(
         <h1>AI Project Intelligence &amp; Risk Advisor</h1>
         <p>
             Transform project documents into searchable knowledge,
-            discover important signals, and support better project decisions.
+            discover risk signals, and support better decisions.
         </p>
     </div>
     """,
@@ -413,54 +488,34 @@ st.markdown(
 
 
 # =========================================================
-# 9. OVERVIEW PAGE
+# 8. OVERVIEW
 # =========================================================
 
 if page == "Overview":
-
     files = list_uploaded_files()
+    total_size = sum(p.stat().st_size for p in files)
 
-    total_size = sum(
-        path.stat().st_size
-        for path in files
-        if path.exists()
-    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📄 Documents", len(files))
+    c2.metric("💾 Stored data", human_size(total_size))
+    c3.metric("🔎 Searches", len(st.session_state.search_history))
+    c4.metric("⚠️ Risk analysis", "Keyword-based")
 
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("📄 Documents", len(files))
-    col2.metric("💾 Stored data", human_size(total_size))
-    col3.metric("🔎 Searches", len(st.session_state.search_history))
-    col4.metric("⚠️ Risk keywords", "Heuristic")
-
-    st.markdown("## Welcome to your intelligence workspace")
-
-    left, right = st.columns([1.35, 1])
+    left, right = st.columns([1.3, 1])
 
     with left:
         st.markdown(
             """
             <div class="section-card">
-                <h3>🚀 What this platform does</h3>
-                <p>
-                    <b>Document intelligence</b><br>
-                    Upload project files and prepare them for local indexing.
-                </p>
-                <p>
-                    <b>Semantic search</b><br>
-                    Search for meaning and context rather than relying only
-                    on exact keyword matches.
-                </p>
-                <p>
-                    <b>Risk signal discovery</b><br>
-                    Flag document passages containing risk-related language
-                    for human review.
-                </p>
-                <p>
-                    <b>Local-first architecture</b><br>
-                    Use local embedding models and a persistent vector
-                    database without requiring a commercial LLM API key.
-                </p>
+                <h3>🚀 Platform capabilities</h3>
+                <p><b>Document intelligence</b><br>
+                Upload project files for local indexing.</p>
+                <p><b>Semantic search</b><br>
+                Retrieve relevant project knowledge by meaning.</p>
+                <p><b>Risk signals</b><br>
+                Identify risk-related language for human review.</p>
+                <p><b>Local-first processing</b><br>
+                Use local embeddings and a persistent vector database.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -470,202 +525,185 @@ if page == "Overview":
         st.markdown(
             """
             <div class="section-card">
-                <h3>🧭 Quick start</h3>
-                <p>1. Open <b>Document Center</b>.</p>
-                <p>2. Upload project documents.</p>
-                <p>3. Index the documents into the vector store.</p>
-                <p>4. Open <b>Semantic Search</b>.</p>
-                <p>5. Explore <b>Risk Signals</b> and validate the results.</p>
+                <h3>🧭 Getting started</h3>
+                <p>1. Open Document Center.</p>
+                <p>2. Select one or more files to upload.</p>
+                <p>3. Index the documents.</p>
+                <p>4. Ask questions in Semantic Search.</p>
+                <p>5. Review Risk Signals.</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    st.markdown("## Recently stored documents")
+    st.markdown("### Recently uploaded files")
 
     if files:
-        rows = []
-
-        for path in files[:8]:
-            stat = path.stat()
-
-            rows.append(
-                {
-                    "Document": path.name,
-                    "Size": human_size(stat.st_size),
-                    "Last modified": datetime.fromtimestamp(
-                        stat.st_mtime
-                    ).strftime("%d %b %Y, %I:%M %p"),
-                }
-            )
-
         st.dataframe(
-            pd.DataFrame(rows),
+            pd.DataFrame([
+                {
+                    "Filename": p.name,
+                    "Size": human_size(p.stat().st_size),
+                    "Modified": datetime.fromtimestamp(
+                        p.stat().st_mtime
+                    ).strftime("%d %b %Y, %H:%M"),
+                }
+                for p in files[:10]
+            ]),
             use_container_width=True,
             hide_index=True,
         )
     else:
-        st.info(
-            "No documents are stored yet. Open Document Center to upload "
-            "your first project document."
-        )
-
-    st.caption(
-        "Note: keyword-based risk indicators are preliminary signals, "
-        "not validated predictions of project failure."
-    )
+        st.info("No uploaded files yet. Visit Document Center to begin.")
 
 
 # =========================================================
-# 10. DOCUMENT CENTER PAGE
+# 9. DOCUMENT CENTER — MULTIPLE FILE UPLOADS
 # =========================================================
 
 elif page == "Document Center":
-
     st.markdown("## 📂 Document Center")
     st.write(
-        "Upload project documentation and add it to the local search index."
+        "Select multiple project documents in one operation, then save "
+        "and index each document."
     )
 
     st.info(
-        "Supported formats depend on your ingestion implementation. "
-        "Common formats include PDF, DOCX, TXT, Markdown, CSV, JSON, "
-        "XLSX, PPTX, HTML, and source-code files."
+        "Accepted formats depend on your ingestion code. Common formats "
+        "include PDF, DOCX, TXT, MD, CSV, JSON, XLSX, PPTX, HTML, and code."
     )
 
     uploaded_files = st.file_uploader(
-        "Choose project documents",
+        "Choose one or more documents",
         type=None,
         accept_multiple_files=True,
-        help="Select one or more files from your computer.",
+        help="Hold Ctrl or Shift while selecting files to choose multiple.",
+        key="project_document_uploader",
     )
 
-    pipeline = get_pipeline_safely()
-
-    if st.button(
-        "📥 Save and index documents",
-        type="primary",
-        use_container_width=True,
-        disabled=not uploaded_files or pipeline is None,
-    ):
-
-        successful = 0
-        failures = []
-
-        progress = st.progress(0)
-        status = st.empty()
-
-        for index, uploaded_file in enumerate(uploaded_files):
-
-            try:
-                safe_name = Path(uploaded_file.name).name
-
-                if not safe_name:
-                    raise ValueError("The uploaded file has no valid name.")
-
-                saved_path = UPLOAD_DIR / safe_name
-
-                # Avoid overwriting an existing file with the same name.
-                if saved_path.exists():
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    saved_path = UPLOAD_DIR / (
-                        f"{saved_path.stem}_{timestamp}{saved_path.suffix}"
-                    )
-
-                status.write(f"Processing: {safe_name}")
-
-                with open(saved_path, "wb") as file_handle:
-                    file_handle.write(uploaded_file.getbuffer())
-
-                run_document_ingestion(pipeline, saved_path)
-
-                successful += 1
-
-            except Exception as exc:
-                failures.append(
-                    {
-                        "file": uploaded_file.name,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-
-            progress.progress((index + 1) / len(uploaded_files))
-
-        status.empty()
-
-        if successful:
-            st.success(
-                f"Successfully processed {successful} document(s)."
-            )
-            st.cache_data.clear()
-
-        if failures:
-            st.error(
-                f"{len(failures)} document(s) could not be indexed."
-            )
-
-            for failure in failures:
-                with st.expander(f"Error: {failure['file']}"):
-                    st.code(failure["error"])
-
-        st.rerun()
-
-    st.divider()
-
-    st.markdown("### Stored files")
-
-    files = list_uploaded_files()
-
-    if files:
-        rows = []
-
-        for path in files:
-            stat = path.stat()
-
-            rows.append(
-                {
-                    "Filename": path.name,
-                    "File type": path.suffix.lower() or "No extension",
-                    "Size": human_size(stat.st_size),
-                    "Modified": datetime.fromtimestamp(
-                        stat.st_mtime
-                    ).strftime("%d %b %Y, %H:%M"),
-                }
-            )
+    if uploaded_files:
+        st.success(f"{len(uploaded_files)} file(s) selected.")
 
         st.dataframe(
-            pd.DataFrame(rows),
+            pd.DataFrame([
+                {
+                    "Filename": file.name,
+                    "Type": file.type or "Unknown",
+                    "Size": human_size(file.size),
+                }
+                for file in uploaded_files
+            ]),
             use_container_width=True,
             hide_index=True,
         )
 
+    if st.button(
+        "📥 Save and index selected documents",
+        type="primary",
+        use_container_width=True,
+        disabled=not uploaded_files,
+    ):
+        pipeline = get_pipeline_safely()
+
+        if pipeline is not None:
+            successes = []
+            failures = []
+
+            progress = st.progress(0)
+            status = st.empty()
+
+            for index, uploaded_file in enumerate(uploaded_files):
+                saved_path = None
+
+                try:
+                    saved_path = unique_upload_path(uploaded_file.name)
+                    status.write(
+                        f"Processing {index + 1}/{len(uploaded_files)}: "
+                        f"{uploaded_file.name}"
+                    )
+
+                    # Save the original upload first.
+                    with saved_path.open("wb") as output:
+                        output.write(uploaded_file.getbuffer())
+
+                    # Index the saved file.
+                    run_document_ingestion(pipeline, saved_path)
+                    successes.append(saved_path.name)
+
+                except Exception as exc:
+                    failures.append({
+                        "Filename": uploaded_file.name,
+                        "Error": f"{type(exc).__name__}: {exc}",
+                    })
+
+                finally:
+                    progress.progress((index + 1) / len(uploaded_files))
+
+            status.empty()
+
+            if successes:
+                st.success(
+                    f"Successfully indexed {len(successes)} file(s)."
+                )
+                for name in successes:
+                    st.write(f"✓ {name}")
+
+            if failures:
+                st.error(
+                    f"{len(failures)} file(s) could not be indexed."
+                )
+                st.dataframe(
+                    pd.DataFrame(failures),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # Do not rerun immediately: keep the result messages visible.
+
+    st.divider()
+    st.markdown("### Files saved in the uploads folder")
+
+    stored_files = list_uploaded_files()
+
+    if stored_files:
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Filename": p.name,
+                    "Extension": p.suffix.lower() or "None",
+                    "Size": human_size(p.stat().st_size),
+                    "Modified": datetime.fromtimestamp(
+                        p.stat().st_mtime
+                    ).strftime("%d %b %Y, %H:%M"),
+                }
+                for p in stored_files
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
-        st.info("Your uploads folder is currently empty.")
+        st.info("The uploads folder is empty.")
 
 
 # =========================================================
-# 11. SEMANTIC SEARCH PAGE
+# 10. SEMANTIC SEARCH
 # =========================================================
 
 elif page == "Semantic Search":
-
     st.markdown("## 🔎 Semantic Search")
-    st.write(
-        "Ask a question about your indexed project documentation."
-    )
+    st.write("Ask a question about the indexed project documentation.")
 
     with st.form("semantic_search_form"):
-
         query = st.text_area(
             "Your question",
             placeholder=(
-                "Example: Which project dependencies could delay delivery?"
+                "Example: Which dependencies might delay project delivery?"
             ),
             height=110,
         )
 
         top_k = st.slider(
-            "Number of results to retrieve",
+            "Number of passages to retrieve",
             min_value=1,
             max_value=10,
             value=5,
@@ -678,73 +716,52 @@ elif page == "Semantic Search":
         )
 
     if submitted:
-
         if not query.strip():
-            st.warning("Enter a question before searching.")
-
+            st.warning("Please enter a question.")
         else:
             pipeline = get_pipeline_safely()
 
             if pipeline is not None:
                 try:
-                    with st.spinner(
-                        "Searching the local project knowledge base..."
-                    ):
+                    with st.spinner("Searching indexed documents..."):
                         result = run_semantic_search(
-                            pipeline,
-                            query.strip(),
-                            top_k,
+                            pipeline, query.strip(), top_k
                         )
 
                     st.session_state.last_answer = result
                     st.session_state.last_query = query.strip()
-
-                    st.session_state.search_history.append(
-                        {
-                            "query": query.strip(),
-                            "timestamp": datetime.now().strftime(
-                                "%d %b %Y, %H:%M:%S"
-                            ),
-                        }
-                    )
+                    st.session_state.search_history.append({
+                        "Question": query.strip(),
+                        "Time": datetime.now().strftime(
+                            "%d %b %Y, %H:%M:%S"
+                        ),
+                    })
 
                 except Exception as exc:
-                    st.error("The semantic search failed.")
+                    st.error("Semantic search failed.")
                     st.code(f"{type(exc).__name__}: {exc}")
 
     if st.session_state.last_answer is not None:
-
         st.divider()
-        st.markdown("### Search result")
-
-        st.markdown(
-            f"**Question:** {st.session_state.last_query}"
-        )
-
-        st.markdown(
-            extract_result_text(st.session_state.last_answer)
-        )
+        st.markdown("### Result")
+        st.markdown(f"**Question:** {st.session_state.last_query}")
+        st.write(normalize_result(st.session_state.last_answer))
 
         if isinstance(st.session_state.last_answer, dict):
-            with st.expander("View raw result details"):
-                st.json(
-                    st.session_state.last_answer,
-                    expanded=True,
-                )
+            with st.expander("View result details"):
+                st.json(st.session_state.last_answer)
 
         elif isinstance(st.session_state.last_answer, list):
             with st.expander("View retrieved passages"):
                 for index, item in enumerate(
-                    st.session_state.last_answer,
-                    start=1,
+                    st.session_state.last_answer, start=1
                 ):
-                    st.markdown(f"**Result {index}**")
+                    st.markdown(f"**Passage {index}**")
                     st.write(item)
                     st.divider()
 
     st.divider()
-
-    st.markdown("### Recent search history")
+    st.markdown("### Recent searches")
 
     if st.session_state.search_history:
         st.dataframe(
@@ -755,312 +772,223 @@ elif page == "Semantic Search":
             hide_index=True,
         )
     else:
-        st.caption("Your search history will appear here.")
+        st.caption("Search history will appear here.")
 
 
 # =========================================================
-# 12. RISK SIGNALS PAGE
+# 11. RISK SIGNALS
 # =========================================================
 
 elif page == "Risk Signals":
-
     st.markdown("## ⚠️ Risk Signals")
     st.write(
-        "Scan stored text-based documents for language that may indicate "
-        "delivery, budget, dependency, or resource risks."
+        "Scan text extracted from uploaded documents for phrases that "
+        "may indicate project delivery, budget, dependency, resource, "
+        "or quality concerns."
     )
 
     st.warning(
-        "This is a preliminary keyword-based scan. It does not understand "
-        "all context, calculate a validated risk probability, or replace "
-        "a project manager's assessment."
+        "These are keyword matches, not validated risk predictions. "
+        "Review the context before taking action."
     )
 
     risk_categories = {
         "Schedule and delivery": [
-            "delay",
-            "delayed",
-            "behind schedule",
-            "deadline",
-            "overdue",
-            "milestone",
-            "slippage",
+            "delay", "delayed", "behind schedule", "deadline",
+            "overdue", "milestone", "slippage",
         ],
         "Budget and cost": [
-            "budget overrun",
-            "cost overrun",
-            "overspend",
-            "funding",
-            "budget risk",
-            "cost increase",
+            "budget overrun", "cost overrun", "overspend",
+            "funding", "budget risk", "cost increase",
         ],
         "Dependencies and blockers": [
-            "dependency",
-            "dependencies",
-            "blocked",
-            "blocker",
-            "third-party",
-            "vendor delay",
-            "integration issue",
+            "dependency", "dependencies", "blocked", "blocker",
+            "third-party", "vendor delay", "integration issue",
         ],
         "Resources and staffing": [
-            "resource shortage",
-            "staffing",
-            "understaffed",
-            "capacity",
-            "unavailable",
-            "key person",
+            "resource shortage", "staffing", "understaffed",
+            "capacity", "unavailable", "key person",
         ],
         "Quality and technical issues": [
-            "critical bug",
-            "defect",
-            "failure",
-            "security vulnerability",
-            "data loss",
-            "performance issue",
+            "critical bug", "defect", "failure",
+            "security vulnerability", "data loss", "performance issue",
         ],
     }
 
-    files = list_uploaded_files()
+    stored_files = list_uploaded_files()
 
-    if not files:
-        st.info(
-            "Upload project documents first to scan them for risk signals."
-        )
-
+    if not stored_files:
+        st.info("Upload documents in Document Center before scanning.")
     else:
-        st.markdown("### Scan settings")
-
         selected_categories = st.multiselect(
-            "Risk categories",
+            "Select categories",
             options=list(risk_categories.keys()),
             default=list(risk_categories.keys()),
         )
 
-        max_preview = st.slider(
-            "Maximum matching excerpts per category",
-            min_value=1,
-            max_value=20,
-            value=5,
-        )
-
         if st.button(
-            "🔍 Scan documents for risk signals",
+            "🔍 Scan uploaded documents",
             type="primary",
             use_container_width=True,
         ):
-
             try:
                 from app.ingestion import extract_text_from_file
 
-                all_findings = []
-                category_totals = {
-                    category: 0
-                    for category in selected_categories
-                }
+                findings = []
+                totals = {category: 0 for category in selected_categories}
 
-                for path in files:
-
+                for path in stored_files:
                     try:
-                        extracted_text = extract_text_from_file(str(path))
-
-                        if not extracted_text:
-                            continue
-
-                        lines = extracted_text.splitlines()
-
-                        # Fall back to the entire text if it contains no
-                        # meaningful line breaks.
-                        if not lines:
-                            lines = [extracted_text]
+                        text = extract_text_from_file(str(path)) or ""
 
                         for line_number, line in enumerate(
-                            lines,
-                            start=1,
+                            text.splitlines(), start=1
                         ):
-                            normalized = line.lower()
+                            normalized = line.casefold()
 
                             for category in selected_categories:
-                                matching_terms = [
-                                    term
-                                    for term in risk_categories[category]
+                                matches = [
+                                    term for term in risk_categories[category]
                                     if term in normalized
                                 ]
 
-                                if matching_terms:
-                                    category_totals[category] += 1
-
-                                    all_findings.append(
-                                        {
-                                            "Category": category,
-                                            "Document": path.name,
-                                            "Line": line_number,
-                                            "Matched terms": ", ".join(
-                                                matching_terms
-                                            ),
-                                            "Excerpt": line.strip()[:500],
-                                        }
-                                    )
+                                if matches:
+                                    totals[category] += 1
+                                    findings.append({
+                                        "Category": category,
+                                        "Document": path.name,
+                                        "Line": line_number,
+                                        "Matched terms": ", ".join(matches),
+                                        "Excerpt": line.strip()[:500],
+                                    })
 
                     except Exception as exc:
                         st.warning(
-                            f"Could not scan {path.name}: "
-                            f"{type(exc).__name__}: {exc}"
+                            f"{path.name}: {type(exc).__name__}: {exc}"
                         )
 
-                st.session_state["risk_findings"] = all_findings
-                st.session_state["risk_totals"] = category_totals
+                st.session_state.risk_findings = findings
+                st.session_state.risk_totals = totals
 
             except Exception as exc:
-                st.error("Could not start the risk scan.")
+                st.error("Risk scan could not start.")
                 st.code(f"{type(exc).__name__}: {exc}")
 
-        findings = st.session_state.get("risk_findings", None)
+        findings = st.session_state.risk_findings
 
         if findings is not None:
-
-            totals = st.session_state.get("risk_totals", {})
-
             st.divider()
             st.markdown("### Scan summary")
 
-            metric_columns = st.columns(
-                max(1, min(4, len(totals) or 1))
-            )
+            if st.session_state.risk_totals:
+                metric_columns = st.columns(
+                    min(4, len(st.session_state.risk_totals))
+                )
 
-            if totals:
-                for index, (category, count) in enumerate(totals.items()):
+                for index, (category, count) in enumerate(
+                    st.session_state.risk_totals.items()
+                ):
                     with metric_columns[index % len(metric_columns)]:
                         st.metric(category, count)
 
-            st.metric("Total matching excerpts", len(findings))
+            st.metric("Matching excerpts", len(findings))
 
             if findings:
                 findings_df = pd.DataFrame(findings)
-
-                st.markdown("### Detected signals")
-
                 st.dataframe(
                     findings_df,
                     use_container_width=True,
                     hide_index=True,
                 )
 
-                csv_data = findings_df.to_csv(index=False).encode("utf-8")
-
                 st.download_button(
-                    "⬇️ Export findings as CSV",
-                    data=csv_data,
+                    "⬇️ Download findings as CSV",
+                    data=findings_df.to_csv(index=False).encode("utf-8"),
                     file_name="project_risk_signals.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
-
-                for category in selected_categories:
-                    category_findings = [
-                        finding
-                        for finding in findings
-                        if finding["Category"] == category
-                    ]
-
-                    if category_findings:
-                        with st.expander(
-                            f"{category} — {len(category_findings)} finding(s)"
-                        ):
-                            for finding in category_findings[
-                                :max_preview
-                            ]:
-                                st.markdown(
-                                    f"**{finding['Document']}** "
-                                    f"(line {finding['Line']})"
-                                )
-                                st.caption(
-                                    "Matched: "
-                                    + finding["Matched terms"]
-                                )
-                                st.write(finding["Excerpt"])
-                                st.divider()
-
             else:
                 st.success(
-                    "No configured risk keywords were found in the "
-                    "scanned text. This does not guarantee the absence "
-                    "of project risks."
+                    "No configured risk keywords were found. "
+                    "This does not guarantee the project is risk-free."
                 )
 
 
 # =========================================================
-# 13. SYSTEM DIAGNOSTICS PAGE
+# 12. SYSTEM DIAGNOSTICS
 # =========================================================
 
 elif page == "System Diagnostics":
-
     st.markdown("## 🛠️ System Diagnostics")
-    st.write(
-        "Inspect the local folders and check whether the application "
-        "can initialize its AI pipeline."
-    )
-
-    folder_info = []
-
-    for folder in [ROOT, DATA_DIR, UPLOAD_DIR, CHROMA_DIR]:
-        folder_info.append(
-            {
-                "Path": str(folder),
-                "Exists": folder.exists(),
-                "Is directory": folder.is_dir(),
-                "Is file": folder.is_file(),
-            }
-        )
 
     st.markdown("### Folder checks")
 
+    folder_rows = []
+
+    for path in (ROOT, DATA_DIR, UPLOAD_DIR, CHROMA_DIR):
+        folder_rows.append({
+            "Path": str(path),
+            "Exists": path.exists(),
+            "Is folder": path.is_dir(),
+            "Is file": path.is_file(),
+        })
+
     st.dataframe(
-        pd.DataFrame(folder_info),
+        pd.DataFrame(folder_rows),
         use_container_width=True,
         hide_index=True,
     )
 
-    st.markdown("### Runtime information")
+    st.markdown("### Python environment")
 
     st.code(
-        f"Python executable: {__import__('sys').executable}\n"
-        f"Python version: {__import__('sys').version.split()[0]}\n"
+        f"Python executable: {sys.executable}\n"
+        f"Python version: {sys.version.split()[0]}\n"
         f"Project root: {ROOT}\n"
         f"Working directory: {Path.cwd()}"
     )
 
-    st.markdown("### AI pipeline")
+    st.markdown("### RAG pipeline constructor")
+
+    try:
+        st.code(str(inspect.signature(RAGPipeline)))
+    except Exception as exc:
+        st.error(f"Could not inspect constructor: {exc}")
+
+    st.markdown("### Pipeline test")
 
     if st.button("Test pipeline initialization", type="primary"):
         pipeline = get_pipeline_safely()
 
         if pipeline is not None:
-            st.success(
-                "The RAGPipeline object initialized successfully."
-            )
+            st.success("RAGPipeline initialized successfully.")
             st.caption(
-                "This confirms initialization only. It does not guarantee "
-                "that document ingestion or search will succeed."
+                "Ingestion and search still need to be tested separately."
             )
 
-    st.markdown("### Stored documents")
+    st.markdown("### Upload directory")
 
-    files = list_uploaded_files()
+    stored_files = list_uploaded_files()
 
-    if files:
-        st.write(f"Found {len(files)} file(s) in the uploads folder.")
-
-        for path in files:
-            st.write(
-                f"• {path.name} — {human_size(path.stat().st_size)}"
-            )
+    if stored_files:
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Filename": path.name,
+                    "Size": human_size(path.stat().st_size),
+                }
+                for path in stored_files
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
-        st.info("No uploaded files were found.")
+        st.info("No uploaded files found.")
 
 
 # =========================================================
-# 14. FOOTER
+# 13. FOOTER
 # =========================================================
 
 st.divider()
