@@ -2,7 +2,6 @@
 from io import BytesIO
 from pathlib import Path
 import json
-import re
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
@@ -18,13 +17,15 @@ TEXT_EXTENSIONS = {
     ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".php",
     ".rb", ".swift", ".kt", ".sql", ".sh", ".bat", ".ps1",
     ".css", ".scss", ".ini", ".cfg", ".conf", ".toml",
-    ".env.example", ".r", ".ipynb.txt",
+    ".r", ".ipynb.txt",
 }
 
 
 class _HTMLTextParser(HTMLParser):
+    """Extract readable text from HTML markup."""
+
     def __init__(self):
-        super().__init__()
+        super().__init__(convert_charrefs=True)
         self.parts = []
 
     def handle_data(self, data):
@@ -34,7 +35,9 @@ class _HTMLTextParser(HTMLParser):
 
 
 def _record(text, source, **metadata):
+    """Create a normalized text record with source metadata."""
     text = str(text).strip()
+
     if not text:
         return None
 
@@ -45,15 +48,63 @@ def _record(text, source, **metadata):
     }
 
 
+def _decode_text(content):
+    """Decode text bytes with common encoding fallbacks."""
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return content.decode("utf-8", errors="replace")
+
+
+def _extract_tabular_records(frame, source, sheet=None):
+    """Convert dataframe rows into searchable text records."""
+    records = []
+    frame = frame.fillna("")
+
+    for row_number, row in enumerate(
+        frame.to_dict(orient="records"), start=2
+    ):
+        fields = [
+            f"{key}: {value}"
+            for key, value in row.items()
+            if str(value).strip()
+        ]
+
+        text = " | ".join(fields)
+
+        if sheet is not None:
+            text = f"Sheet: {sheet}\n{text}"
+
+        metadata = {"row": row_number}
+        if sheet is not None:
+            metadata["sheet"] = str(sheet)
+
+        item = _record(text, source, **metadata)
+        if item:
+            records.append(item)
+
+    return records
+
+
 def extract_document(filename, content):
     """
     Extract readable text records from a supported file.
 
-    filename: original filename, including its extension
-    content: file bytes
-    returns: list of dictionaries with text and source metadata
+    Args:
+        filename: Original filename, including its extension.
+        content: File content as bytes.
+
+    Returns:
+        A list of dictionaries containing text, source, and metadata.
+
+    Supported formats:
+        PDF, DOCX, CSV, TSV, XLSX, XLS, JSON, HTML, XML,
+        PPTX, and common text/source-code formats.
     """
-    filename = Path(filename).name
+    filename = Path(str(filename)).name
     suffix = Path(filename).suffix.lower()
     source = filename
     records = []
@@ -64,6 +115,14 @@ def extract_document(filename, content):
     try:
         if suffix == ".pdf":
             reader = PdfReader(BytesIO(content))
+
+            if reader.is_encrypted:
+                try:
+                    reader.decrypt("")
+                except Exception as exc:
+                    raise ValueError(
+                        "The PDF is password-protected."
+                    ) from exc
 
             for page_number, page in enumerate(reader.pages, start=1):
                 item = _record(
@@ -77,7 +136,9 @@ def extract_document(filename, content):
         elif suffix == ".docx":
             doc = Document(BytesIO(content))
 
-            for index, paragraph in enumerate(doc.paragraphs, start=1):
+            for index, paragraph in enumerate(
+                doc.paragraphs, start=1
+            ):
                 item = _record(
                     paragraph.text,
                     source,
@@ -86,11 +147,16 @@ def extract_document(filename, content):
                 if item:
                     records.append(item)
 
-            for table_index, table in enumerate(doc.tables, start=1):
-                for row_index, row in enumerate(table.rows, start=1):
+            for table_index, table in enumerate(
+                doc.tables, start=1
+            ):
+                for row_index, row in enumerate(
+                    table.rows, start=1
+                ):
                     text = " | ".join(
                         cell.text.strip() for cell in row.cells
                     )
+
                     item = _record(
                         text,
                         source,
@@ -100,73 +166,76 @@ def extract_document(filename, content):
                     if item:
                         records.append(item)
 
-        elif suffix == ".csv":
-            frame = pd.read_csv(BytesIO(content)).fillna("")
+        elif suffix in {".csv", ".tsv"}:
+            separator = "\t" if suffix == ".tsv" else ","
 
-            for row_number, row in enumerate(
-                frame.to_dict(orient="records"), start=2
-            ):
-                text = " | ".join(
-                    f"{key}: {value}" for key, value in row.items()
-                )
-                item = _record(text, source, row=row_number)
-                if item:
-                    records.append(item)
-
-        elif suffix == ".tsv":
             frame = pd.read_csv(
-                BytesIO(content), sep="\t"
-            ).fillna("")
+                BytesIO(content),
+                sep=separator,
+                encoding="utf-8-sig",
+                encoding_errors="replace",
+                dtype=str,
+                keep_default_na=False,
+                on_bad_lines="error",
+            )
 
-            for row_number, row in enumerate(
-                frame.to_dict(orient="records"), start=2
-            ):
-                text = " | ".join(
-                    f"{key}: {value}" for key, value in row.items()
-                )
-                item = _record(text, source, row=row_number)
-                if item:
-                    records.append(item)
+            records.extend(
+                _extract_tabular_records(frame, source)
+            )
 
         elif suffix in {".xlsx", ".xls"}:
             sheets = pd.read_excel(
                 BytesIO(content),
                 sheet_name=None,
+                dtype=str,
             )
 
             for sheet_name, frame in sheets.items():
-                frame = frame.fillna("")
-
-                for row_number, row in enumerate(
-                    frame.to_dict(orient="records"), start=2
-                ):
-                    text = " | ".join(
-                        f"{key}: {value}" for key, value in row.items()
-                    )
-                    item = _record(
-                        f"Sheet: {sheet_name}\n{text}",
+                records.extend(
+                    _extract_tabular_records(
+                        frame,
                         source,
                         sheet=sheet_name,
-                        row=row_number,
+                    )
+                )
+
+        elif suffix == ".json":
+            parsed = json.loads(_decode_text(content))
+
+            if isinstance(parsed, list):
+                for index, entry in enumerate(parsed, start=1):
+                    item = _record(
+                        json.dumps(
+                            entry,
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        source,
+                        record=index,
                     )
                     if item:
                         records.append(item)
-
-        elif suffix == ".json":
-            parsed = json.loads(content.decode("utf-8-sig"))
-            formatted = json.dumps(
-                parsed,
-                ensure_ascii=False,
-                indent=2,
-            )
-            item = _record(formatted, source)
-            if item:
-                records.append(item)
+            else:
+                item = _record(
+                    json.dumps(
+                        parsed,
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    source,
+                )
+                if item:
+                    records.append(item)
 
         elif suffix in {".html", ".htm"}:
             parser = _HTMLTextParser()
-            parser.feed(content.decode("utf-8-sig", errors="replace"))
-            item = _record("\n".join(parser.parts), source)
+            parser.feed(_decode_text(content))
+            parser.close()
+
+            item = _record(
+                "\n".join(parser.parts),
+                source,
+            )
             if item:
                 records.append(item)
 
@@ -175,9 +244,12 @@ def extract_document(filename, content):
             parts = []
 
             for element in root.iter():
+                tag = element.tag.split("}")[-1]
+
                 if element.text and element.text.strip():
-                    tag = element.tag.split("}")[-1]
-                    parts.append(f"{tag}: {element.text.strip()}")
+                    parts.append(
+                        f"{tag}: {element.text.strip()}"
+                    )
 
                 for key, value in element.attrib.items():
                     parts.append(f"{key}: {value}")
@@ -216,31 +288,59 @@ def extract_document(filename, content):
                 if item:
                     records.append(item)
 
-        elif suffix in TEXT_EXTENSIONS or suffix in {".txt", ".md"}:
-            text = content.decode("utf-8-sig", errors="replace")
-            item = _record(text, source)
+        elif suffix in TEXT_EXTENSIONS:
+            item = _record(_decode_text(content), source)
             if item:
                 records.append(item)
 
         else:
             raise ValueError(
-                f"Unsupported file type: {suffix or '(no extension)'}. "
-                "Supported formats include PDF, DOCX, CSV, TSV, TXT, "
-                "MD, JSON, XLSX, XLS, PPTX, HTML, XML, YAML, logs, "
-                "and common source-code files."
+                f"Unsupported file type: "
+                f"{suffix or '(no extension)'}. "
+                "Supported formats include PDF, DOCX, CSV, TSV, "
+                "TXT, MD, JSON, XLSX, XLS, PPTX, HTML, XML, YAML, "
+                "logs, and common source-code files."
             )
 
     except ValueError:
         raise
     except Exception as exc:
         raise ValueError(
-            f"Could not read {filename}: {exc}"
+            f"Could not read '{filename}': {exc}"
         ) from exc
 
     if not records:
         raise ValueError(
-            "No readable text was extracted. The file may be empty, "
-            "contain only images, or require OCR."
+            "No readable text was extracted from this file. "
+            "It may be empty, image-only, or require OCR."
         )
 
     return records
+
+
+def extract_text_from_file(file_path):
+    """
+    Backward-compatible path-based extractor.
+
+    Allows existing dashboard code to call:
+        extract_text_from_file(file_path)
+
+    Returns all extracted text as one string.
+    """
+    path = Path(file_path)
+
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(
+            f"File not found: {path}"
+        )
+
+    records = extract_document(
+        filename=path.name,
+        content=path.read_bytes(),
+    )
+
+    return "\n\n".join(
+        record["text"]
+        for record in records
+        if record.get("text")
+    )

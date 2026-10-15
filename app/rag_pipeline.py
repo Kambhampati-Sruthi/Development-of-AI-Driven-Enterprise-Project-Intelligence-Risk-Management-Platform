@@ -1,22 +1,30 @@
+
 from pathlib import Path
 import hashlib
 
 import chromadb
-import pandas as pd
-from docx import Document
-from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
+
+from app.ingestion import extract_document
 
 
 class RAGPipeline:
-    def __init__(self):
+    """Local RAG pipeline for project document intelligence."""
+
+    def __init__(self, upload_dir=None, chroma_dir=None):
         self.root = Path(__file__).resolve().parent.parent
-        self.upload_dir = self.root / "data" / "uploads"
-        self.db_dir = self.root / "data" / "chroma_db"
+
+        self.upload_dir = Path(
+            upload_dir or self.root / "data" / "uploads"
+        )
+        self.db_dir = Path(
+            chroma_dir or self.root / "data" / "chroma_db"
+        )
 
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.db_dir.mkdir(parents=True, exist_ok=True)
 
+        # Local embedding model; no API key is required.
         self.model = SentenceTransformer(
             "sentence-transformers/all-MiniLM-L6-v2"
         )
@@ -31,61 +39,62 @@ class RAGPipeline:
         )
 
     def _extract_text(self, path):
+        """Use the shared ingestion module for document extraction."""
         path = Path(path)
-        extension = path.suffix.lower()
+
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Document not found: {path}"
+            )
+
+        records = extract_document(
+            filename=path.name,
+            content=path.read_bytes(),
+        )
+
         sections = []
 
-        if extension == ".pdf":
-            reader = PdfReader(str(path))
-            for page_number, page in enumerate(reader.pages, start=1):
-                text = page.extract_text() or ""
-                if text.strip():
-                    sections.append(
-                        {"text": text, "page": page_number}
-                    )
+        for record in records:
+            text = record.get("text", "").strip()
 
-        elif extension == ".docx":
-            document = Document(str(path))
-            text = "\n".join(
-                paragraph.text
-                for paragraph in document.paragraphs
-                if paragraph.text.strip()
-            )
-            if text.strip():
-                sections.append({"text": text})
+            if not text:
+                continue
 
-        elif extension == ".csv":
-            dataframe = pd.read_csv(path).fillna("")
-            for row_number, row in enumerate(
-                dataframe.to_dict(orient="records"), start=1
-            ):
-                row_text = " | ".join(
-                    f"{key}: {value}" for key, value in row.items()
-                )
-                if row_text.strip():
-                    sections.append(
-                        {"text": row_text, "row": row_number}
-                    )
+            metadata = {
+                key: value
+                for key, value in record.items()
+                if key not in {"text", "source"}
+                and isinstance(value, (str, int, float, bool))
+            }
 
-        elif extension in {".txt", ".md"}:
-            text = path.read_text(encoding="utf-8-sig")
-            if text.strip():
-                sections.append({"text": text})
-
-        else:
-            raise ValueError(
-                "Unsupported file type. Use PDF, DOCX, CSV, TXT, or MD."
-            )
+            sections.append({
+                "text": text,
+                **metadata,
+            })
 
         if not sections:
             raise ValueError(
-                "No readable text was found. If this is a scanned PDF, "
-                "you may need OCR before indexing it."
+                f"No readable text found in '{path.name}'."
             )
 
         return sections
 
-    def _make_chunks(self, sections, chunk_size=1200, overlap=180):
+    def _make_chunks(
+        self,
+        sections,
+        chunk_size=1200,
+        overlap=180,
+    ):
+        """Split extracted text into overlapping character chunks."""
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive.")
+
+        if overlap < 0 or overlap >= chunk_size:
+            raise ValueError(
+                "overlap must be non-negative and smaller "
+                "than chunk_size."
+            )
+
         chunks = []
 
         for section in sections:
@@ -94,11 +103,11 @@ class RAGPipeline:
 
             while start < len(text):
                 end = min(start + chunk_size, len(text))
-                chunk = text[start:end].strip()
+                chunk_text = text[start:end].strip()
 
-                if chunk:
+                if chunk_text:
                     chunks.append({
-                        "text": chunk,
+                        "text": chunk_text,
                         "metadata": {
                             key: value
                             for key, value in section.items()
@@ -114,6 +123,7 @@ class RAGPipeline:
         return chunks
 
     def index_file(self, file_path):
+        """Extract, chunk, embed, and index one document."""
         path = Path(file_path)
         source = path.name
 
@@ -121,30 +131,29 @@ class RAGPipeline:
         chunks = self._make_chunks(sections)
 
         if not chunks:
-            raise ValueError("No text chunks were created.")
-
-        # Remove older chunks for this filename before re-indexing.
-        existing = self.collection.get(
-            where={"source": source},
-            include=[],
-        )
-        if existing["ids"]:
-            self.collection.delete(ids=existing["ids"])
+            raise ValueError(
+                f"No text chunks were created for '{source}'."
+            )
 
         texts = [chunk["text"] for chunk in chunks]
+
         embeddings = self.model.encode(
             texts,
             normalize_embeddings=True,
             show_progress_bar=False,
+            batch_size=32,
         )
 
         ids = []
         metadatas = []
 
         for index, chunk in enumerate(chunks):
-            raw_id = f"{source}:{index}:{chunk['text']}"
+            content_hash = hashlib.sha256(
+                chunk["text"].encode("utf-8")
+            ).hexdigest()
+
             chunk_id = hashlib.sha256(
-                raw_id.encode("utf-8")
+                f"{source}:{index}:{content_hash}".encode("utf-8")
             ).hexdigest()
 
             metadata = {
@@ -157,6 +166,9 @@ class RAGPipeline:
             ids.append(chunk_id)
             metadatas.append(metadata)
 
+        # Replace older indexed chunks for this filename.
+        # Index new content first so extraction/embedding failures
+        # do not erase the previous index.
         self.collection.upsert(
             ids=ids,
             documents=texts,
@@ -164,37 +176,79 @@ class RAGPipeline:
             metadatas=metadatas,
         )
 
+        # Remove stale chunks left over from a previous version
+        # of the same file, if the chunk count has changed.
+        current_ids = set(ids)
+        existing = self.collection.get(
+            where={"source": source},
+            include=[],
+        )
+        stale_ids = [
+            item_id
+            for item_id in existing.get("ids", [])
+            if item_id not in current_ids
+        ]
+
+        if stale_ids:
+            self.collection.delete(ids=stale_ids)
+
         return {
             "source": source,
             "chunks": len(chunks),
             "status": "Indexed successfully",
         }
 
+    def index_files(self, file_paths):
+        """Index multiple files and report each result independently."""
+        results = []
+
+        for file_path in file_paths:
+            try:
+                results.append(self.index_file(file_path))
+            except Exception as exc:
+                results.append({
+                    "source": Path(file_path).name,
+                    "chunks": 0,
+                    "status": f"Failed: {exc}",
+                })
+
+        return results
+
     def search(self, query, n_results=5):
-        query = query.strip()
+        """Retrieve the most relevant indexed text chunks."""
+        query = str(query).strip()
 
         if not query:
             return []
 
+        if n_results < 1:
+            return []
+
         total = self.collection.count()
+
         if total == 0:
             return []
 
         query_embedding = self.model.encode(
             [query],
             normalize_embeddings=True,
+            show_progress_bar=False,
         )[0]
 
         result = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
             n_results=min(n_results, total),
-            include=["documents", "metadatas", "distances"],
+            include=[
+                "documents",
+                "metadatas",
+                "distances",
+            ],
         )
 
         matches = []
-        documents = result.get("documents", [[]])[0]
-        metadatas = result.get("metadatas", [[]])[0]
-        distances = result.get("distances", [[]])[0]
+        documents = result.get("documents", [[]])[0] or []
+        metadatas = result.get("metadatas", [[]])[0] or []
+        distances = result.get("distances", [[]])[0] or []
 
         for text, metadata, distance in zip(
             documents, metadatas, distances
@@ -207,10 +261,61 @@ class RAGPipeline:
 
         return matches
 
+    def retrieve_context(self, query, n_results=5):
+        """Return retrieved context with source attribution for an assistant."""
+        matches = self.search(query, n_results=n_results)
+
+        if not matches:
+            return {
+                "query": query,
+                "context": "",
+                "sources": [],
+                "matches": [],
+            }
+
+        context_parts = []
+        sources = []
+
+        for match in matches:
+            metadata = match["metadata"]
+            source = metadata.get("source", "Unknown document")
+
+            location = ""
+            if "page" in metadata:
+                location = f", page {metadata['page']}"
+            elif "sheet" in metadata:
+                location = f", sheet {metadata['sheet']}"
+                if "row" in metadata:
+                    location += f", row {metadata['row']}"
+            elif "row" in metadata:
+                location = f", row {metadata['row']}"
+
+            context_parts.append(
+                f"Source: {source}{location}\n"
+                f"{match['text']}"
+            )
+
+            source_info = {
+                "source": source,
+                "location": location.lstrip(", "),
+            }
+
+            if source_info not in sources:
+                sources.append(source_info)
+
+        return {
+            "query": query,
+            "context": "\n\n---\n\n".join(context_parts),
+            "sources": sources,
+            "matches": matches,
+        }
+
     def get_dashboard_stats(self):
+        """Return knowledge-base metrics and preliminary keyword risk signals."""
         result = self.collection.get(
             include=["documents", "metadatas"]
         )
+
         documents = result.get("documents", []) or []
         metadatas = result.get("metadatas", []) or []
 
@@ -220,15 +325,32 @@ class RAGPipeline:
         }
 
         risk_terms = (
-            "blocked", "blocker", "delay", "delayed", "overdue",
-            "risk", "failed", "failure", "dependency", "延期",
-            "critical", "pending", "slippage", "issue",
+            "blocked",
+            "blocker",
+            "delay",
+            "delayed",
+            "overdue",
+            "risk",
+            "failed",
+            "failure",
+            "dependency",
+            "critical",
+            "pending",
+            "slippage",
+            "issue",
+            "escalation",
+            "behind schedule",
+            "延期",
         )
 
         risks = []
+
         for text, metadata in zip(documents, metadatas):
             lowered = text.lower()
-            matched = [term for term in risk_terms if term in lowered]
+            matched = [
+                term for term in risk_terms
+                if term in lowered
+            ]
 
             if matched:
                 risks.append({
@@ -240,13 +362,16 @@ class RAGPipeline:
         chunk_count = len(documents)
         risk_count = len(risks)
 
-        # Preliminary keyword-based indicator, not an AI risk prediction.
-        health_score = (
-            100 if chunk_count == 0
-            else max(0, min(100, 100 - round(
-                60 * min(risk_count / max(chunk_count, 1), 1)
-            )))
-        )
+        # This is a preliminary keyword indicator, not an
+        # AI prediction or a validated project health score.
+        if chunk_count == 0:
+            health_score = 0
+        else:
+            risk_ratio = risk_count / chunk_count
+            health_score = max(
+                0,
+                min(100, 100 - round(60 * risk_ratio)),
+            )
 
         return {
             "document_count": len(sources),
