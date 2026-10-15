@@ -1,0 +1,12 @@
+streamlit
+pypdf
+python-docx
+pandas
+openpyxl
+xlrd
+python-pptx
+sentence-transformers
+chromadb
+langchain-text-splitters
+python-dotenv
+pytest
