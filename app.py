@@ -1,14 +1,18 @@
 
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime
 import inspect
 import json
-import sys
 
 import pandas as pd
 import streamlit as st
 
 from app.rag_pipeline import RAGPipeline
+from app.ingestion import extract_text_from_file
+from app.agents import ProjectAnalysisAgents
+from app.health import calculate_project_health
+from app.documentation_agent import DocumentationGenerationAgent
+from app.assistant import ProjectIntelligenceAssistant
 
 
 # =========================================================
@@ -16,15 +20,15 @@ from app.rag_pipeline import RAGPipeline
 # =========================================================
 
 st.set_page_config(
-    page_title="AI Project Intelligence & Risk Advisor",
+    page_title="Project Intelligence | Risk Advisor",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 
 # =========================================================
-# 2. PATHS AND DIRECTORY SETUP
+# 2. DIRECTORIES
 # =========================================================
 
 ROOT = Path(__file__).resolve().parent
@@ -32,122 +36,313 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 CHROMA_DIR = DATA_DIR / "chroma_db"
 
-
-def ensure_directory(path: Path):
-    """Create a directory, but never replace a conflicting file."""
-    if path.exists() and not path.is_dir():
-        raise NotADirectoryError(
-            f"A file exists where a folder is required:\n{path}\n"
-            "Rename or move the file before restarting the application."
-        )
-
-    path.mkdir(parents=True, exist_ok=True)
-
-
-try:
-    ensure_directory(DATA_DIR)
-    ensure_directory(UPLOAD_DIR)
-    ensure_directory(CHROMA_DIR)
-except Exception as exc:
-    st.error("Could not initialize the project folders.")
-    st.code(f"{type(exc).__name__}: {exc}")
-    st.info(
-        "Check the paths above in File Explorer. Do not delete your "
-        "existing ChromaDB data to resolve a folder conflict."
-    )
-    st.stop()
+for folder in (DATA_DIR, UPLOAD_DIR, CHROMA_DIR):
+    if folder.exists() and not folder.is_dir():
+        st.error(f"A file exists where a directory is required: {folder}")
+        st.stop()
+    folder.mkdir(parents=True, exist_ok=True)
 
 
 # =========================================================
-# 3. STYLING
+# 3. WEBSITE-STYLE CSS
 # =========================================================
 
 st.markdown(
     """
     <style>
+    :root {
+        --page-bg: #080d19;
+        --panel-bg: #10182a;
+        --panel-soft: #131e33;
+        --border: rgba(148, 163, 184, 0.16);
+        --muted: #9aaac2;
+        --text: #edf3ff;
+        --blue: #67a5ff;
+        --violet: #a78bfa;
+        --cyan: #67e8f9;
+    }
+
     .stApp {
-        background: linear-gradient(
-            145deg, #08111f 0%, #0b1526 50%, #111c31 100%
-        );
-        color: #edf3ff;
+        background:
+            radial-gradient(
+                ellipse at 10% 0%,
+                rgba(59, 130, 246, 0.12),
+                transparent 34%
+            ),
+            radial-gradient(
+                ellipse at 95% 10%,
+                rgba(139, 92, 246, 0.10),
+                transparent 28%
+            ),
+            var(--page-bg);
+        color: var(--text);
     }
 
-    [data-testid="stSidebar"] {
-        background: #0b1220;
-        border-right: 1px solid rgba(148, 163, 184, 0.18);
+    [data-testid="stSidebar"],
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] {
+        display: none !important;
     }
 
-    [data-testid="stSidebar"] * {
-        color: #e2e8f0;
+    .block-container {
+        max-width: 1500px;
+        padding-top: 1.1rem;
+        padding-bottom: 3rem;
+    }
+
+    header[data-testid="stHeader"] {
+        background: transparent;
+    }
+
+    [data-testid="stDecoration"] {
+        display: none;
+    }
+
+    h1, h2, h3 {
+        color: #f3f6ff !important;
+        letter-spacing: -0.025em;
+    }
+
+    p, label, .stMarkdown {
+        color: #d3ddef;
+    }
+
+    .top-brand {
+        display: flex;
+        align-items: center;
+        gap: 13px;
+        padding: 10px 0 18px 0;
+    }
+
+    .brand-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 46px;
+        height: 46px;
+        border-radius: 15px;
+        background: linear-gradient(135deg, #2563eb, #7c3aed);
+        box-shadow: 0 8px 30px rgba(59, 130, 246, 0.23);
+        font-size: 24px;
+    }
+
+    .brand-title {
+        color: #f8fafc;
+        font-size: 1.15rem;
+        font-weight: 750;
+        line-height: 1.35;
+    }
+
+    .brand-subtitle {
+        color: #91a3bd;
+        font-size: 0.78rem;
+        margin-top: 2px;
+    }
+
+    .top-status {
+        text-align: right;
+        color: #a8b8d0;
+        font-size: 0.8rem;
+        padding-top: 12px;
     }
 
     .hero {
-        padding: 30px;
-        border-radius: 22px;
-        background: linear-gradient(
-            120deg,
-            rgba(37, 99, 235, 0.27),
-            rgba(124, 58, 237, 0.22),
-            rgba(8, 145, 178, 0.16)
-        );
-        border: 1px solid rgba(147, 197, 253, 0.25);
-        margin-bottom: 24px;
+        position: relative;
+        overflow: hidden;
+        padding: 32px;
+        margin: 10px 0 24px 0;
+        border: 1px solid rgba(147, 197, 253, 0.19);
+        border-radius: 24px;
+        background:
+            linear-gradient(
+                112deg,
+                rgba(30, 64, 175, 0.28),
+                rgba(76, 29, 149, 0.20) 58%,
+                rgba(8, 145, 178, 0.10)
+            );
     }
 
-    .hero h1 {
-        font-size: 2.15rem;
-        color: #f8fafc;
-        margin-bottom: 8px;
-    }
-
-    .hero p {
-        color: #cbd5e1;
-        margin-bottom: 0;
-    }
-
-    .eyebrow {
+    .hero-eyebrow {
         text-transform: uppercase;
         letter-spacing: 2px;
-        color: #7dd3fc;
-        font-size: 0.75rem;
-        font-weight: 700;
+        font-size: 0.72rem;
+        font-weight: 800;
+        color: #93c5fd;
+        margin-bottom: 12px;
     }
 
-    .section-card {
-        padding: 20px;
-        border-radius: 16px;
-        background: rgba(15, 23, 42, 0.75);
-        border: 1px solid rgba(148, 163, 184, 0.17);
-        margin-bottom: 14px;
-    }
-
-    .section-card h3 {
-        color: #f1f5f9;
-        margin-top: 0;
-    }
-
-    .section-card p {
-        color: #cbd5e1;
-    }
-
-    div[data-testid="stMetric"] {
-        background: rgba(15, 23, 42, 0.78);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        padding: 15px;
-        border-radius: 15px;
-    }
-
-    div[data-testid="stMetricValue"] {
+    .hero-title {
         color: #f8fafc;
+        font-size: clamp(1.75rem, 3vw, 2.65rem);
+        font-weight: 800;
+        line-height: 1.16;
+        letter-spacing: -1.5px;
+        margin-bottom: 12px;
     }
 
-    .stButton > button {
-        border-radius: 10px;
+    .hero-description {
+        max-width: 780px;
+        color: #c4d1e4;
+        font-size: 1rem;
+        line-height: 1.75;
+    }
+
+    .hero-footnote {
+        color: #9cb6da;
+        font-size: 0.78rem;
+        margin-top: 18px;
+    }
+
+    .section-kicker {
+        color: #8ab9ff;
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        font-size: 0.7rem;
+        font-weight: 800;
+        margin-bottom: 5px;
+    }
+
+    .section-description {
+        color: var(--muted);
+        margin-top: -4px;
+        margin-bottom: 18px;
+        font-size: 0.9rem;
+    }
+
+    .panel {
+        background: linear-gradient(
+            145deg,
+            rgba(19, 30, 51, 0.95),
+            rgba(13, 22, 39, 0.96)
+        );
+        border: 1px solid var(--border);
+        border-radius: 19px;
+        padding: 21px;
+        margin-bottom: 15px;
+    }
+
+    .panel-title {
+        color: #f1f5ff;
+        font-size: 1rem;
+        font-weight: 750;
+        margin-bottom: 9px;
+    }
+
+    .panel-text {
+        color: #9fb0c9;
+        font-size: 0.86rem;
+        line-height: 1.7;
+    }
+
+    .kpi-label {
+        color: #9fb0c9;
+        font-size: 0.78rem;
         font-weight: 600;
     }
 
+    .kpi-note {
+        color: #8297b5;
+        font-size: 0.75rem;
+        margin-top: 4px;
+    }
+
+    div[data-testid="stMetric"] {
+        background: linear-gradient(
+            145deg,
+            rgba(19, 30, 51, 0.97),
+            rgba(13, 22, 39, 0.97)
+        );
+        border: 1px solid var(--border);
+        border-radius: 17px;
+        padding: 18px 18px 15px 18px;
+        min-height: 112px;
+    }
+
+    div[data-testid="stMetricLabel"] {
+        color: #a7b6cd !important;
+    }
+
+    div[data-testid="stMetricValue"] {
+        color: #f4f7ff !important;
+        font-weight: 800;
+    }
+
+    div[data-testid="stMetricDelta"] {
+        font-size: 0.76rem;
+    }
+
+    .stButton > button,
+    .stDownloadButton > button {
+        border-radius: 11px;
+        min-height: 42px;
+        font-weight: 650;
+        border: 1px solid rgba(125, 164, 225, 0.22);
+        transition: all 0.18s ease;
+    }
+
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(100deg, #2563eb, #6d4aff);
+        color: white;
+        border: none;
+    }
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        border-color: #7c9ee8;
+        transform: translateY(-1px);
+    }
+
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stDateInput"] input {
+        background: #0c1424;
+        color: #f1f5ff;
+        border-color: rgba(148, 163, 184, 0.25);
+        border-radius: 10px;
+    }
+
+    [data-testid="stFileUploader"] {
+        background: rgba(12, 20, 36, 0.6);
+        border: 1px dashed rgba(125, 164, 225, 0.4);
+        border-radius: 15px;
+        padding: 10px;
+    }
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    [data-testid="stProgressBar"] > div > div {
+        background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+    }
+
+    div[data-testid="stAlert"] {
+        border-radius: 12px;
+    }
+
     hr {
-        border-color: rgba(148, 163, 184, 0.2);
+        border-color: rgba(148, 163, 184, 0.15);
+        margin: 22px 0;
+    }
+
+    .footer {
+        color: #70839f;
+        font-size: 0.78rem;
+        text-align: center;
+        padding: 16px 0 0 0;
+    }
+
+    @media (max-width: 800px) {
+        .hero {
+            padding: 23px;
+        }
+
+        .top-status {
+            text-align: left;
+            padding: 0 0 10px 0;
+        }
     }
     </style>
     """,
@@ -160,110 +355,31 @@ st.markdown(
 # =========================================================
 
 DEFAULT_STATE = {
+    "page": "Overview",
     "search_history": [],
     "last_answer": None,
     "last_query": "",
-    "risk_findings": None,
-    "risk_totals": {},
+    "project_analysis": None,
+    "project_health": None,
+    "project_documentation": None,
+    "analysis_signature": None,
+    "analysis_errors": [],
 }
 
-for key, default_value in DEFAULT_STATE.items():
+for key, value in DEFAULT_STATE.items():
     if key not in st.session_state:
-        st.session_state[key] = default_value
+        st.session_state[key] = value
 
 
 # =========================================================
-# 5. PIPELINE INITIALIZATION
-# =========================================================
-
-@st.cache_resource(show_spinner=False)
-def get_pipeline():
-    """
-    Pass only constructor arguments supported by the installed
-    RAGPipeline class.
-
-    If the constructor has required arguments with different names,
-    inspect app/rag_pipeline.py and add their names to the mapping.
-    """
-    signature = inspect.signature(RAGPipeline)
-    parameters = signature.parameters
-
-    argument_values = {
-        "upload_dir": str(UPLOAD_DIR),
-        "upload_path": str(UPLOAD_DIR),
-        "uploads_dir": str(UPLOAD_DIR),
-        "chroma_dir": str(CHROMA_DIR),
-        "persist_directory": str(CHROMA_DIR),
-        "persist_dir": str(CHROMA_DIR),
-        "db_path": str(CHROMA_DIR),
-        "persist_path": str(CHROMA_DIR),
-        "collection_path": str(CHROMA_DIR),
-    }
-
-    accepts_extra_keywords = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD
-        for p in parameters.values()
-    )
-
-    if accepts_extra_keywords:
-        return RAGPipeline(
-            upload_dir=str(UPLOAD_DIR),
-            chroma_dir=str(CHROMA_DIR),
-        )
-
-    kwargs = {
-        name: argument_values[name]
-        for name in parameters
-        if name in argument_values
-    }
-
-    # Identify required constructor arguments we cannot supply.
-    missing = [
-        name
-        for name, parameter in parameters.items()
-        if name not in kwargs
-        and parameter.default is inspect.Parameter.empty
-        and parameter.kind
-        not in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        )
-    ]
-
-    if missing:
-        raise TypeError(
-            "RAGPipeline requires constructor argument(s) that this "
-            "app cannot identify automatically: "
-            + ", ".join(missing)
-            + ". Check app/rag_pipeline.py."
-        )
-
-    return RAGPipeline(**kwargs)
-
-
-def get_pipeline_safely():
-    try:
-        return get_pipeline()
-    except Exception as exc:
-        st.error("The AI search pipeline could not be initialized.")
-        st.code(f"{type(exc).__name__}: {exc}")
-        st.info(
-            "The exact constructor and its defaults are defined in "
-            "app/rag_pipeline.py. If required arguments are reported, "
-            "match them to that file."
-        )
-        return None
-
-
-# =========================================================
-# 6. GENERAL UTILITIES
+# 5. FILE AND DISPLAY UTILITIES
 # =========================================================
 
 def list_uploaded_files():
     try:
         return sorted(
-            [p for p in UPLOAD_DIR.iterdir() if p.is_file()],
-            key=lambda p: p.stat().st_mtime,
+            [path for path in UPLOAD_DIR.iterdir() if path.is_file()],
+            key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
     except OSError:
@@ -282,313 +398,529 @@ def human_size(size_bytes):
 
 
 def unique_upload_path(filename):
-    """Avoid overwriting an existing upload with the same filename."""
-    safe_name = Path(filename).name
+    name = Path(filename).name
 
-    if not safe_name or safe_name in {".", ".."}:
+    if not name or name in {".", ".."}:
         raise ValueError("Invalid uploaded filename.")
 
-    destination = UPLOAD_DIR / safe_name
+    destination = UPLOAD_DIR / name
 
     if not destination.exists():
         return destination
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return destination.with_name(
-        f"{destination.stem}_{timestamp}{destination.suffix}"
+        f"{destination.stem}_{stamp}{destination.suffix}"
     )
 
 
-def normalize_result(result):
-    if result is None:
-        return "No result was returned."
-
-    if isinstance(result, str):
-        return result
-
-    if isinstance(result, dict):
-        for key in ("answer", "response", "result", "text"):
-            if result.get(key) is not None:
-                return str(result[key])
-
-        return json.dumps(result, indent=2, default=str)
-
-    if isinstance(result, list):
-        return "\n\n".join(str(item) for item in result)
-
-    return str(result)
+def invalidate_analysis():
+    st.session_state.project_analysis = None
+    st.session_state.project_health = None
+    st.session_state.project_documentation = None
+    st.session_state.analysis_signature = None
+    st.session_state.analysis_errors = []
 
 
-def call_with_supported_arguments(method, query, top_k=None):
+def current_file_signature():
+    """Detect when the uploaded file list or modification times change."""
+    return tuple(
+        (
+            path.name,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in list_uploaded_files()
+    )
+
+
+# =========================================================
+# 6. PIPELINE INITIALIZATION
+# =========================================================
+
+@st.cache_resource(show_spinner=False)
+def get_pipeline():
+    return RAGPipeline(
+        upload_dir=str(UPLOAD_DIR),
+        chroma_dir=str(CHROMA_DIR),
+    )
+
+
+def get_pipeline_safely():
+    try:
+        return get_pipeline()
+    except Exception as exc:
+        st.error("The local RAG pipeline could not initialize.")
+        st.code(f"{type(exc).__name__}: {exc}")
+        return None
+
+
+# =========================================================
+# 7. INGESTION COMPATIBILITY
+# =========================================================
+
+def index_saved_file(pipeline, file_path):
     """
-    Call a pipeline method using recognized argument names.
+    Call the available file-indexing method using its actual signature.
     """
-    signature = inspect.signature(method)
-    params = signature.parameters
+    path = Path(file_path)
 
-    kwargs = {}
-
-    query_names = (
-        "query", "question", "text", "user_query", "search_query"
-    )
-    top_k_names = ("top_k", "k", "n_results", "num_results")
-
-    query_parameter = next(
-        (name for name in query_names if name in params),
-        None,
-    )
-
-    top_k_parameter = next(
-        (name for name in top_k_names if name in params),
-        None,
-    )
-
-    if query_parameter:
-        kwargs[query_parameter] = query
-    elif any(
-        p.kind == inspect.Parameter.VAR_KEYWORD
-        for p in params.values()
-    ):
-        kwargs["query"] = query
-    else:
-        # Use the first positional argument if the method has one.
-        positional = [
-            p for p in params.values()
-            if p.kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-        ]
-        if not positional:
-            raise TypeError(
-                f"Cannot identify the query argument for {method.__name__}."
-            )
-        kwargs[positional[0].name] = query
-
-    if top_k is not None and top_k_parameter:
-        kwargs[top_k_parameter] = top_k
-
-    return method(**kwargs)
-
-
-def run_semantic_search(pipeline, query, top_k):
     method_names = (
-        "query",
-        "search",
-        "ask",
-        "query_documents",
-        "search_documents",
-        "search_similar",
-    )
-
-    for name in method_names:
-        method = getattr(pipeline, name, None)
-
-        if callable(method):
-            return call_with_supported_arguments(
-                method, query, top_k
-            )
-
-    raise AttributeError(
-        "No supported search method was found in RAGPipeline. "
-        "Check the method names in app/rag_pipeline.py."
-    )
-
-
-def run_document_ingestion(pipeline, file_path):
-    method_names = (
+        "index_file",
         "ingest_file",
         "add_document",
         "process_file",
         "ingest_document",
-        "index_file",
         "add_file",
         "ingest",
-        "add_documents",
     )
 
-    for name in method_names:
-        method = getattr(pipeline, name, None)
+    path_names = (
+        "file_path",
+        "path",
+        "filepath",
+        "document_path",
+        "source_path",
+        "file",
+    )
+
+    for method_name in method_names:
+        method = getattr(pipeline, method_name, None)
 
         if not callable(method):
             continue
 
         signature = inspect.signature(method)
-        params = signature.parameters
-
-        path_names = (
-            "file_path", "path", "filepath", "document_path",
-            "source_path", "file",
-        )
+        parameters = signature.parameters
 
         path_parameter = next(
-            (key for key in path_names if key in params),
+            (name for name in path_names if name in parameters),
             None,
         )
 
         if path_parameter:
-            return method(**{path_parameter: str(file_path)})
+            return method(**{path_parameter: str(path)})
 
         positional = [
-            p for p in params.values()
-            if p.kind in (
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind in (
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
         ]
 
         if positional:
-            return method(str(file_path))
+            return method(str(path))
+
+    batch_method = getattr(pipeline, "index_files", None)
+
+    if callable(batch_method):
+        return batch_method([str(path)])
 
     raise AttributeError(
-        "No supported document-ingestion method was found in "
-        "RAGPipeline. Check app/rag_pipeline.py."
+        "No compatible file-indexing method was found in "
+        "app/rag_pipeline.py. Check its index_file/index_files methods."
     )
 
 
 # =========================================================
-# 7. SIDEBAR AND HEADER
+# 8. PROJECT ANALYSIS
 # =========================================================
 
-with st.sidebar:
-    st.markdown("## 🧠 Project Intelligence")
-    st.caption("AI-powered project knowledge and risk analysis")
-    st.divider()
-
-    page = st.radio(
-        "NAVIGATION",
-        [
-            "Overview",
-            "Document Center",
-            "Semantic Search",
-            "Risk Signals",
-            "System Diagnostics",
-        ],
-    )
-
-    st.divider()
-    st.metric("Stored documents", len(list_uploaded_files()))
-    st.caption("Local embeddings • ChromaDB • Streamlit")
-    st.divider()
-    st.caption("Infosys Springboard Internship Project")
-
-st.markdown(
+def analyze_uploaded_project(planned_end_date):
     """
-    <div class="hero">
-        <div class="eyebrow">Enterprise intelligence workspace</div>
-        <h1>AI Project Intelligence &amp; Risk Advisor</h1>
-        <p>
-            Transform project documents into searchable knowledge,
-            discover risk signals, and support better decisions.
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
+    Extract text from saved files, run the project agents, calculate
+    project health, and generate the three required documentation types.
+    """
+    files = list_uploaded_files()
+
+    if not files:
+        return None, None, None, [
+            "Upload project documents before running the analysis."
+        ]
+
+    text_parts = []
+    errors = []
+
+    for path in files:
+        try:
+            extracted = extract_text_from_file(str(path))
+
+            if extracted and extracted.strip():
+                text_parts.append(
+                    f"\n\nDOCUMENT: {path.name}\n{extracted}"
+                )
+            else:
+                errors.append(
+                    f"{path.name}: no extractable text was found."
+                )
+
+        except Exception as exc:
+            errors.append(
+                f"{path.name}: {type(exc).__name__}: {exc}"
+            )
+
+    combined_text = "\n".join(text_parts).strip()
+
+    if not combined_text:
+        return None, None, None, errors or [
+            "No readable text was extracted from the uploaded files."
+        ]
+
+    agents = ProjectAnalysisAgents()
+
+    analysis = agents.analyze(
+        combined_text,
+        planned_end_date=planned_end_date.isoformat(),
+    )
+
+    health = calculate_project_health(analysis)
+
+    documentation = DocumentationGenerationAgent().generate_all(
+        analysis
+    )
+
+    return analysis, health, documentation, errors
+
+
+def get_project_analysis():
+    """Return the current analysis, if one has already been generated."""
+    return (
+        st.session_state.project_analysis,
+        st.session_state.project_health,
+        st.session_state.project_documentation,
+    )
+
+
+# =========================================================
+# 9. TOP NAVIGATION
+# =========================================================
+
+top_left, top_right = st.columns([3.2, 1])
+
+with top_left:
+    st.markdown(
+        """
+        <div class="top-brand">
+            <div class="brand-icon">🧠</div>
+            <div>
+                <div class="brand-title">Project Intelligence</div>
+                <div class="brand-subtitle">
+                    AI Project Intelligence &amp; Risk Advisor
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with top_right:
+    st.markdown(
+        """
+        <div class="top-status">
+            <span style="color:#6ee7b7;">●</span>
+            Local workspace<br>
+            <span style="font-size:0.72rem;">Project analysis environment</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+NAV_ITEMS = [
+    "Overview",
+    "Documents",
+    "Intelligence",
+    "Risk Analysis",
+    "Diagnostics",
+]
+
+selected_page = st.radio(
+    "Main navigation",
+    NAV_ITEMS,
+    horizontal=True,
+    label_visibility="collapsed",
+    key="top_navigation",
 )
 
+st.session_state.page = selected_page
+
+st.markdown("---")
+
 
 # =========================================================
-# 8. OVERVIEW
+# 10. OVERVIEW DASHBOARD
 # =========================================================
 
-if page == "Overview":
+if selected_page == "Overview":
     files = list_uploaded_files()
-    total_size = sum(p.stat().st_size for p in files)
+    total_size = sum(path.stat().st_size for path in files)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📄 Documents", len(files))
-    c2.metric("💾 Stored data", human_size(total_size))
-    c3.metric("🔎 Searches", len(st.session_state.search_history))
-    c4.metric("⚠️ Risk analysis", "Keyword-based")
+    analysis, health, documentation = get_project_analysis()
 
-    left, right = st.columns([1.3, 1])
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-eyebrow">Enterprise project workspace</div>
+            <div class="hero-title">
+                Project Intelligence Dashboard
+            </div>
+            <div class="hero-description">
+                Turn project documentation into searchable knowledge.
+                Identify risks, monitor blockers, assess delivery pressure,
+                and generate structured project artifacts from one workspace.
+            </div>
+            <div class="hero-footnote">
+                LOCAL EMBEDDINGS &nbsp; • &nbsp; CHROMADB
+                &nbsp; • &nbsp; DOCUMENT-BASED ANALYSIS
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="section-kicker">Project at a glance</div>',
+                unsafe_allow_html=True)
+    st.markdown("### Workspace overview")
+
+    if health:
+        health_score = health.get("health_score", "—")
+        health_status = health.get("status", "Not calculated")
+    else:
+        health_score = "—"
+        health_status = "Run project analysis"
+
+    risk_count = (
+        analysis.get("risk_analysis", {}).get("risk_count", 0)
+        if analysis else 0
+    )
+    blocker_count = (
+        analysis.get("blocker_analysis", {}).get("blocker_count", 0)
+        if analysis else 0
+    )
+    action_count = (
+        analysis.get("action_analysis", {}).get("action_item_count", 0)
+        if analysis else 0
+    )
+
+    metric_cols = st.columns(5)
+
+    metric_cols[0].metric("Documents", len(files))
+    metric_cols[1].metric("Stored data", human_size(total_size))
+    metric_cols[2].metric("Health score", health_score)
+    metric_cols[3].metric("Risk signals", risk_count)
+    metric_cols[4].metric("Blockers", blocker_count)
+
+    left, right = st.columns([1.25, 1])
 
     with left:
         st.markdown(
             """
-            <div class="section-card">
-                <h3>🚀 Platform capabilities</h3>
-                <p><b>Document intelligence</b><br>
-                Upload project files for local indexing.</p>
-                <p><b>Semantic search</b><br>
-                Retrieve relevant project knowledge by meaning.</p>
-                <p><b>Risk signals</b><br>
-                Identify risk-related language for human review.</p>
-                <p><b>Local-first processing</b><br>
-                Use local embeddings and a persistent vector database.</p>
+            <div class="panel">
+                <div class="panel-title">Workspace activity</div>
+                <div class="panel-text">
+                    <b>Document intelligence</b><br>
+                    Upload project plans, requirements, status reports,
+                    and meeting notes.<br><br>
+                    <b>Knowledge retrieval</b><br>
+                    Ask questions about your indexed documents and inspect
+                    retrieved source passages.<br><br>
+                    <b>Project analysis</b><br>
+                    Extract scope, identify risks and blockers, and
+                    produce a transparent delivery-risk indicator.
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    with right:
-        st.markdown(
-            """
-            <div class="section-card">
-                <h3>🧭 Getting started</h3>
-                <p>1. Open Document Center.</p>
-                <p>2. Select one or more files to upload.</p>
-                <p>3. Index the documents.</p>
-                <p>4. Ask questions in Semantic Search.</p>
-                <p>5. Review Risk Signals.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.markdown("### Recent documents")
 
-    st.markdown("### Recently uploaded files")
-
-    if files:
-        st.dataframe(
-            pd.DataFrame([
+        if files:
+            recent_df = pd.DataFrame([
                 {
-                    "Filename": p.name,
-                    "Size": human_size(p.stat().st_size),
-                    "Modified": datetime.fromtimestamp(
-                        p.stat().st_mtime
+                    "Document": path.name,
+                    "Size": human_size(path.stat().st_size),
+                    "Last modified": datetime.fromtimestamp(
+                        path.stat().st_mtime
                     ).strftime("%d %b %Y, %H:%M"),
                 }
-                for p in files[:10]
-            ]),
+                for path in files[:8]
+            ])
+
+            st.dataframe(
+                recent_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info(
+                "Your workspace is empty. Open Documents to upload files."
+            )
+
+    with right:
+        st.markdown("### Project status")
+
+        if health:
+            st.metric("Overall project health", health_score, health_status)
+
+            if health.get("explanation"):
+                st.write(health["explanation"])
+
+            if health.get("recommendations"):
+                st.markdown("**Recommended actions**")
+                for recommendation in health["recommendations"]:
+                    st.write(f"• {recommendation}")
+        else:
+            st.markdown(
+                """
+                <div class="panel">
+                    <div class="panel-title">Analysis not yet generated</div>
+                    <div class="panel-text">
+                        Upload project documents and run project analysis
+                        to calculate the health score, risk summary,
+                        blocker count, and delivery forecast.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if analysis:
+            forecast = analysis.get("delivery_forecast", {})
+
+            st.markdown("**Delivery forecast**")
+            st.write(
+                forecast.get(
+                    "forecast_status",
+                    "No forecast is available.",
+                )
+            )
+
+            st.caption(
+                "This is a heuristic warning indicator, not a calibrated "
+                "probability of delay."
+            )
+
+        st.markdown("### Quick actions")
+
+        if st.button(
+            "Open document workspace →",
             use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No uploaded files yet. Visit Document Center to begin.")
+            type="primary",
+        ):
+            st.session_state.top_navigation = "Documents"
+            st.rerun()
 
+        if st.button(
+            "Open risk analysis →",
+            use_container_width=True,
+        ):
+            st.session_state.top_navigation = "Risk Analysis"
+            st.rerun()
 
-# =========================================================
-# 9. DOCUMENT CENTER — MULTIPLE FILE UPLOADS
-# =========================================================
+    st.markdown("---")
+    st.markdown("### Project analysis")
 
-elif page == "Document Center":
-    st.markdown("## 📂 Document Center")
     st.write(
-        "Select multiple project documents in one operation, then save "
-        "and index each document."
+        "Run analysis after uploading or updating project documents. "
+        "The analysis uses extracted document text and rule-based agents."
     )
 
-    st.info(
-        "Accepted formats depend on your ingestion code. Common formats "
-        "include PDF, DOCX, TXT, MD, CSV, JSON, XLSX, PPTX, HTML, and code."
+    planned_end_date = st.date_input(
+        "Planned project completion date",
+        value=date.today(),
+        help="Used to calculate the remaining calendar days in the delivery forecast.",
+        key="overview_planned_end_date",
+    )
+
+    if st.button(
+        "Analyze project documents",
+        type="primary",
+        use_container_width=True,
+    ):
+        with st.spinner(
+            "Extracting documents and analyzing project signals..."
+        ):
+            try:
+                analysis, health, documentation, errors = (
+                    analyze_uploaded_project(planned_end_date)
+                )
+
+                st.session_state.project_analysis = analysis
+                st.session_state.project_health = health
+                st.session_state.project_documentation = documentation
+                st.session_state.analysis_errors = errors
+                st.session_state.analysis_signature = current_file_signature()
+
+                if analysis:
+                    st.success("Project analysis completed.")
+                else:
+                    st.warning("Project analysis did not produce a result.")
+
+            except Exception as exc:
+                st.error("Project analysis failed.")
+                st.code(f"{type(exc).__name__}: {exc}")
+
+    for error in st.session_state.analysis_errors:
+        st.warning(error)
+
+    if st.session_state.project_analysis:
+        analysis = st.session_state.project_analysis
+
+        with st.expander("View extracted scope and deliverables"):
+            st.json(analysis.get("scope", {}))
+
+        with st.expander("View risk and blocker analysis"):
+            st.json({
+                "risk_analysis": analysis.get("risk_analysis", {}),
+                "blocker_analysis": analysis.get("blocker_analysis", {}),
+            })
+
+        with st.expander("View delivery forecast and action items"):
+            st.json({
+                "delivery_forecast": analysis.get("delivery_forecast", {}),
+                "action_analysis": analysis.get("action_analysis", {}),
+            })
+
+
+# =========================================================
+# 11. DOCUMENT WORKSPACE
+# =========================================================
+
+elif selected_page == "Documents":
+    st.markdown('<div class="section-kicker">Knowledge base</div>',
+                unsafe_allow_html=True)
+    st.markdown("## Document workspace")
+
+    st.markdown(
+        '<div class="section-description">'
+        'Upload multiple project files, save them locally, and index them '
+        'for semantic retrieval.'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
     uploaded_files = st.file_uploader(
-        "Choose one or more documents",
-        type=None,
+        "Select project documents",
         accept_multiple_files=True,
-        help="Hold Ctrl or Shift while selecting files to choose multiple.",
-        key="project_document_uploader",
+        type=None,
+        help=(
+            "Common supported formats include PDF, DOCX, TXT, CSV, "
+            "XLSX, PPTX, JSON, HTML, and code files. Actual support "
+            "depends on app/ingestion.py."
+        ),
+        key="website_document_uploader",
     )
 
     if uploaded_files:
-        st.success(f"{len(uploaded_files)} file(s) selected.")
+        st.info(f"{len(uploaded_files)} document(s) selected.")
 
         st.dataframe(
             pd.DataFrame([
                 {
                     "Filename": file.name,
-                    "Type": file.type or "Unknown",
+                    "Format": Path(file.name).suffix.lower(),
                     "Size": human_size(file.size),
                 }
                 for file in uploaded_files
@@ -598,7 +930,7 @@ elif page == "Document Center":
         )
 
     if st.button(
-        "📥 Save and index selected documents",
+        "Save and index documents",
         type="primary",
         use_container_width=True,
         disabled=not uploaded_files,
@@ -606,107 +938,115 @@ elif page == "Document Center":
         pipeline = get_pipeline_safely()
 
         if pipeline is not None:
-            successes = []
-            failures = []
+            successful = []
+            failed = []
 
             progress = st.progress(0)
-            status = st.empty()
+            status_box = st.empty()
 
             for index, uploaded_file in enumerate(uploaded_files):
                 saved_path = None
 
                 try:
                     saved_path = unique_upload_path(uploaded_file.name)
-                    status.write(
-                        f"Processing {index + 1}/{len(uploaded_files)}: "
+
+                    status_box.write(
+                        f"Processing {index + 1} of {len(uploaded_files)}: "
                         f"{uploaded_file.name}"
                     )
 
-                    # Save the original upload first.
                     with saved_path.open("wb") as output:
                         output.write(uploaded_file.getbuffer())
 
-                    # Index the saved file.
-                    run_document_ingestion(pipeline, saved_path)
-                    successes.append(saved_path.name)
+                    index_saved_file(pipeline, saved_path)
+                    successful.append(saved_path.name)
 
                 except Exception as exc:
-                    failures.append({
-                        "Filename": uploaded_file.name,
+                    failed.append({
+                        "Document": uploaded_file.name,
                         "Error": f"{type(exc).__name__}: {exc}",
                     })
 
-                finally:
-                    progress.progress((index + 1) / len(uploaded_files))
+                progress.progress((index + 1) / len(uploaded_files))
 
-            status.empty()
+            status_box.empty()
 
-            if successes:
+            if successful:
                 st.success(
-                    f"Successfully indexed {len(successes)} file(s)."
+                    f"Successfully indexed {len(successful)} document(s)."
                 )
-                for name in successes:
-                    st.write(f"✓ {name}")
+                invalidate_analysis()
 
-            if failures:
-                st.error(
-                    f"{len(failures)} file(s) could not be indexed."
-                )
+                with st.expander("Successfully indexed"):
+                    for filename in successful:
+                        st.write(f"✓ {filename}")
+
+            if failed:
+                st.error(f"{len(failed)} document(s) failed.")
                 st.dataframe(
-                    pd.DataFrame(failures),
+                    pd.DataFrame(failed),
                     use_container_width=True,
                     hide_index=True,
                 )
 
-            # Do not rerun immediately: keep the result messages visible.
+    st.markdown("---")
+    st.markdown("### Stored documents")
 
-    st.divider()
-    st.markdown("### Files saved in the uploads folder")
+    files = list_uploaded_files()
 
-    stored_files = list_uploaded_files()
+    if files:
+        files_df = pd.DataFrame([
+            {
+                "Filename": path.name,
+                "Format": path.suffix.lower(),
+                "Size": human_size(path.stat().st_size),
+                "Modified": datetime.fromtimestamp(
+                    path.stat().st_mtime
+                ).strftime("%d %b %Y, %H:%M"),
+            }
+            for path in files
+        ])
 
-    if stored_files:
         st.dataframe(
-            pd.DataFrame([
-                {
-                    "Filename": p.name,
-                    "Extension": p.suffix.lower() or "None",
-                    "Size": human_size(p.stat().st_size),
-                    "Modified": datetime.fromtimestamp(
-                        p.stat().st_mtime
-                    ).strftime("%d %b %Y, %H:%M"),
-                }
-                for p in stored_files
-            ]),
+            files_df,
             use_container_width=True,
             hide_index=True,
         )
-    else:
-        st.info("The uploads folder is empty.")
 
-
-# =========================================================
-# 10. SEMANTIC SEARCH
-# =========================================================
-
-elif page == "Semantic Search":
-    st.markdown("## 🔎 Semantic Search")
-    st.write("Ask a question about the indexed project documentation.")
-
-    with st.form("semantic_search_form"):
-        query = st.text_area(
-            "Your question",
-            placeholder=(
-                "Example: Which dependencies might delay project delivery?"
-            ),
-            height=110,
+        st.download_button(
+            "Download file inventory (CSV)",
+            data=files_df.to_csv(index=False).encode("utf-8"),
+            file_name="project_document_inventory.csv",
+            mime="text/csv",
         )
+    else:
+        st.info("No files have been uploaded yet.")
 
-        top_k = st.slider(
-            "Number of passages to retrieve",
-            min_value=1,
-            max_value=10,
-            value=5,
+
+# =========================================================
+# 12. PROJECT INTELLIGENCE ASSISTANT
+# =========================================================
+
+elif selected_page == "Intelligence":
+    st.markdown('<div class="section-kicker">RAG knowledge assistant</div>',
+                unsafe_allow_html=True)
+    st.markdown("## Ask your project documents")
+
+    st.markdown(
+        '<div class="section-description">'
+        'Search the indexed project knowledge base and inspect the source '
+        'passages returned by the local retrieval pipeline.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.form("project_question_form"):
+        question = st.text_area(
+            "Project question",
+            placeholder=(
+                "Example: What risks could delay the project launch?"
+            ),
+            height=115,
         )
 
         submitted = st.form_submit_button(
@@ -716,54 +1056,67 @@ elif page == "Semantic Search":
         )
 
     if submitted:
-        if not query.strip():
-            st.warning("Please enter a question.")
+        if not question.strip():
+            st.warning("Enter a project question first.")
         else:
             pipeline = get_pipeline_safely()
 
             if pipeline is not None:
                 try:
-                    with st.spinner("Searching indexed documents..."):
-                        result = run_semantic_search(
-                            pipeline, query.strip(), top_k
+                    with st.spinner(
+                        "Retrieving relevant project passages..."
+                    ):
+                        assistant = ProjectIntelligenceAssistant(
+                            rag_pipeline=pipeline,
+                            top_k=5,
                         )
+                        result = assistant.ask(question.strip())
 
                     st.session_state.last_answer = result
-                    st.session_state.last_query = query.strip()
+                    st.session_state.last_query = question.strip()
+
                     st.session_state.search_history.append({
-                        "Question": query.strip(),
+                        "Question": question.strip(),
                         "Time": datetime.now().strftime(
                             "%d %b %Y, %H:%M:%S"
                         ),
                     })
 
                 except Exception as exc:
-                    st.error("Semantic search failed.")
+                    st.error("Project document search failed.")
                     st.code(f"{type(exc).__name__}: {exc}")
 
-    if st.session_state.last_answer is not None:
-        st.divider()
-        st.markdown("### Result")
-        st.markdown(f"**Question:** {st.session_state.last_query}")
-        st.write(normalize_result(st.session_state.last_answer))
+    result = st.session_state.last_answer
 
-        if isinstance(st.session_state.last_answer, dict):
-            with st.expander("View result details"):
-                st.json(st.session_state.last_answer)
+    if result is not None:
+        st.markdown("---")
+        st.markdown("### Retrieved answer")
 
-        elif isinstance(st.session_state.last_answer, list):
-            with st.expander("View retrieved passages"):
-                for index, item in enumerate(
-                    st.session_state.last_answer, start=1
-                ):
-                    st.markdown(f"**Passage {index}**")
-                    st.write(item)
-                    st.divider()
+        if isinstance(result, dict):
+            st.write(result.get("answer", json.dumps(result, indent=2)))
 
-    st.divider()
-    st.markdown("### Recent searches")
+            sources = result.get("sources", [])
+
+            if sources:
+                st.markdown("### Sources")
+
+                st.dataframe(
+                    pd.DataFrame(sources),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.write(str(result))
+
+        st.caption(
+            "The current API-free assistant presents retrieved excerpts. "
+            "Treat them as supporting evidence and verify the source text."
+        )
 
     if st.session_state.search_history:
+        st.markdown("---")
+        st.markdown("### Recent questions")
+
         st.dataframe(
             pd.DataFrame(
                 list(reversed(st.session_state.search_history[-10:]))
@@ -771,230 +1124,378 @@ elif page == "Semantic Search":
             use_container_width=True,
             hide_index=True,
         )
-    else:
-        st.caption("Search history will appear here.")
 
 
 # =========================================================
-# 11. RISK SIGNALS
+# 13. RISK ANALYSIS AND PROJECT HEALTH
 # =========================================================
 
-elif page == "Risk Signals":
-    st.markdown("## ⚠️ Risk Signals")
-    st.write(
-        "Scan text extracted from uploaded documents for phrases that "
-        "may indicate project delivery, budget, dependency, resource, "
-        "or quality concerns."
+elif selected_page == "Risk Analysis":
+    st.markdown('<div class="section-kicker">Delivery monitoring</div>',
+                unsafe_allow_html=True)
+    st.markdown("## Project risks and health")
+
+    st.markdown(
+        '<div class="section-description">'
+        'Review extracted risks, blockers, action items, project health, '
+        'and delivery warning signals.'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
-    st.warning(
-        "These are keyword matches, not validated risk predictions. "
-        "Review the context before taking action."
-    )
+    analysis, health, documentation = get_project_analysis()
 
-    risk_categories = {
-        "Schedule and delivery": [
-            "delay", "delayed", "behind schedule", "deadline",
-            "overdue", "milestone", "slippage",
-        ],
-        "Budget and cost": [
-            "budget overrun", "cost overrun", "overspend",
-            "funding", "budget risk", "cost increase",
-        ],
-        "Dependencies and blockers": [
-            "dependency", "dependencies", "blocked", "blocker",
-            "third-party", "vendor delay", "integration issue",
-        ],
-        "Resources and staffing": [
-            "resource shortage", "staffing", "understaffed",
-            "capacity", "unavailable", "key person",
-        ],
-        "Quality and technical issues": [
-            "critical bug", "defect", "failure",
-            "security vulnerability", "data loss", "performance issue",
-        ],
-    }
-
-    stored_files = list_uploaded_files()
-
-    if not stored_files:
-        st.info("Upload documents in Document Center before scanning.")
+    if analysis is None:
+        st.info(
+            "No project analysis is available yet. Open Overview and click "
+            "'Analyze project documents' first."
+        )
     else:
-        selected_categories = st.multiselect(
-            "Select categories",
-            options=list(risk_categories.keys()),
-            default=list(risk_categories.keys()),
+        forecast = analysis.get("delivery_forecast", {})
+        risk_data = analysis.get("risk_analysis", {})
+        blocker_data = analysis.get("blocker_analysis", {})
+        action_data = analysis.get("action_analysis", {})
+        scope_data = analysis.get("scope", {})
+
+        health_score = (
+            health.get("health_score", "—")
+            if health else "—"
+        )
+        health_status = (
+            health.get("status", "Not calculated")
+            if health else "Not calculated"
         )
 
-        if st.button(
-            "🔍 Scan uploaded documents",
-            type="primary",
-            use_container_width=True,
-        ):
-            try:
-                from app.ingestion import extract_text_from_file
+        cols = st.columns(4)
+        cols[0].metric("Project health", health_score, health_status)
+        cols[1].metric(
+            "Risk signals",
+            risk_data.get("risk_count", len(risk_data.get("risks", []))),
+        )
+        cols[2].metric(
+            "Blockers",
+            blocker_data.get(
+                "blocker_count",
+                len(blocker_data.get("blockers", [])),
+            ),
+        )
+        cols[3].metric(
+            "Action items",
+            action_data.get(
+                "action_item_count",
+                len(action_data.get("action_items", [])),
+            ),
+        )
 
-                findings = []
-                totals = {category: 0 for category in selected_categories}
+        st.markdown("---")
+        st.markdown("### Delivery forecast")
 
-                for path in stored_files:
-                    try:
-                        text = extract_text_from_file(str(path)) or ""
+        st.markdown(
+            f"**Status:** {forecast.get('forecast_status', 'Unavailable')}"
+        )
 
-                        for line_number, line in enumerate(
-                            text.splitlines(), start=1
-                        ):
-                            normalized = line.casefold()
+        forecast_cols = st.columns(3)
+        forecast_cols[0].metric(
+            "Delivery pressure",
+            forecast.get("delivery_pressure_score", "—"),
+            help="Heuristic indicator, not a probability of delay.",
+        )
+        forecast_cols[1].metric(
+            "Days until planned end",
+            forecast.get("days_until_planned_end", "—"),
+        )
+        forecast_cols[2].metric(
+            "Overdue actions",
+            forecast.get("overdue_action_count", 0),
+        )
 
-                            for category in selected_categories:
-                                matches = [
-                                    term for term in risk_categories[category]
-                                    if term in normalized
-                                ]
+        for warning in forecast.get("warnings", []):
+            st.warning(warning)
 
-                                if matches:
-                                    totals[category] += 1
-                                    findings.append({
-                                        "Category": category,
-                                        "Document": path.name,
-                                        "Line": line_number,
-                                        "Matched terms": ", ".join(matches),
-                                        "Excerpt": line.strip()[:500],
-                                    })
+        if health:
+            st.markdown("---")
+            st.markdown("### Health score explanation")
 
-                    except Exception as exc:
-                        st.warning(
-                            f"{path.name}: {type(exc).__name__}: {exc}"
-                        )
+            if health.get("explanation"):
+                st.write(health["explanation"])
 
-                st.session_state.risk_findings = findings
-                st.session_state.risk_totals = totals
-
-            except Exception as exc:
-                st.error("Risk scan could not start.")
-                st.code(f"{type(exc).__name__}: {exc}")
-
-        findings = st.session_state.risk_findings
-
-        if findings is not None:
-            st.divider()
-            st.markdown("### Scan summary")
-
-            if st.session_state.risk_totals:
-                metric_columns = st.columns(
-                    min(4, len(st.session_state.risk_totals))
-                )
-
-                for index, (category, count) in enumerate(
-                    st.session_state.risk_totals.items()
-                ):
-                    with metric_columns[index % len(metric_columns)]:
-                        st.metric(category, count)
-
-            st.metric("Matching excerpts", len(findings))
-
-            if findings:
-                findings_df = pd.DataFrame(findings)
+            if health.get("deductions"):
                 st.dataframe(
-                    findings_df,
+                    pd.DataFrame([
+                        {"Factor": key, "Impact": value}
+                        for key, value in health["deductions"].items()
+                    ]),
                     use_container_width=True,
                     hide_index=True,
                 )
 
-                st.download_button(
-                    "⬇️ Download findings as CSV",
-                    data=findings_df.to_csv(index=False).encode("utf-8"),
-                    file_name="project_risk_signals.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            else:
-                st.success(
-                    "No configured risk keywords were found. "
-                    "This does not guarantee the project is risk-free."
-                )
+            if health.get("recommendations"):
+                st.markdown("**Recommendations**")
+                for recommendation in health["recommendations"]:
+                    st.write(f"• {recommendation}")
+
+        st.markdown("---")
+        st.markdown("### Risk register")
+
+        risks = risk_data.get("risks", []) or []
+
+        if risks:
+            risk_df = pd.DataFrame(risks)
+            st.dataframe(
+                risk_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.download_button(
+                "Download risk register (CSV)",
+                data=risk_df.to_csv(index=False).encode("utf-8"),
+                file_name="project_risk_register.csv",
+                mime="text/csv",
+            )
+        else:
+            st.success("No risk signals were detected by the current rules.")
+
+        st.markdown("---")
+        st.markdown("### Blockers")
+
+        blockers = blocker_data.get("blockers", []) or []
+
+        if blockers:
+            st.dataframe(
+                pd.DataFrame(blockers),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No blockers were detected by the current rules.")
+
+        st.markdown("---")
+        st.markdown("### Action items")
+
+        actions = action_data.get("action_items", []) or []
+
+        if actions:
+            st.dataframe(
+                pd.DataFrame(actions),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No action items were detected by the current rules.")
+
+        st.markdown("---")
+        st.markdown("### Scope and deliverables")
+
+        scope_cols = st.columns(3)
+        scope_cols[0].metric(
+            "Objectives",
+            scope_data.get("objective_count", 0),
+        )
+        scope_cols[1].metric(
+            "Deliverables",
+            scope_data.get("deliverable_count", 0),
+        )
+        scope_cols[2].metric(
+            "Scope statements",
+            scope_data.get("scope_item_count", 0),
+        )
+
+        with st.expander("View scope extraction details"):
+            st.json(scope_data)
+
+        st.markdown("---")
+        st.markdown("### Generated project documentation")
+
+        if documentation:
+            story_df = pd.DataFrame(
+                documentation.get("user_stories", [])
+            )
+            risk_register_df = pd.DataFrame(
+                documentation.get("risk_register", [])
+            )
+            action_df = pd.DataFrame(
+                documentation.get("action_items", [])
+            )
+
+            story_tab, register_tab, action_tab = st.tabs([
+                "User Stories",
+                "Risk Register",
+                "Action Items",
+            ])
+
+            with story_tab:
+                if not story_df.empty:
+                    st.dataframe(
+                        story_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.download_button(
+                        "Download user stories (CSV)",
+                        data=story_df.to_csv(index=False).encode("utf-8"),
+                        file_name="project_user_stories.csv",
+                        mime="text/csv",
+                        key="download_user_stories",
+                    )
+                else:
+                    st.info(
+                        "No user stories could be drafted from the "
+                        "detected objectives or deliverables."
+                    )
+
+            with register_tab:
+                if not risk_register_df.empty:
+                    st.dataframe(
+                        risk_register_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.download_button(
+                        "Download documentation risk register (CSV)",
+                        data=risk_register_df.to_csv(
+                            index=False
+                        ).encode("utf-8"),
+                        file_name="project_documentation_risk_register.csv",
+                        mime="text/csv",
+                        key="download_documentation_risks",
+                    )
+                else:
+                    st.info("No risk entries are available.")
+
+            with action_tab:
+                if not action_df.empty:
+                    st.dataframe(
+                        action_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.download_button(
+                        "Download action items (CSV)",
+                        data=action_df.to_csv(index=False).encode("utf-8"),
+                        file_name="project_action_items.csv",
+                        mime="text/csv",
+                        key="download_action_items",
+                    )
+                else:
+                    st.info("No action-item entries are available.")
+
+        st.caption(
+            "Risk detection, delivery forecasting, and health scoring use "
+            "heuristics. Validate the results against actual project records."
+        )
 
 
 # =========================================================
-# 12. SYSTEM DIAGNOSTICS
+# 14. SYSTEM DIAGNOSTICS
 # =========================================================
 
-elif page == "System Diagnostics":
-    st.markdown("## 🛠️ System Diagnostics")
+elif selected_page == "Diagnostics":
+    st.markdown('<div class="section-kicker">Environment status</div>',
+                unsafe_allow_html=True)
+    st.markdown("## System diagnostics")
 
-    st.markdown("### Folder checks")
+    st.markdown(
+        '<div class="section-description">'
+        'Check the local workspace, dependencies, stored files, and '
+        'RAG pipeline initialization.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     folder_rows = []
 
-    for path in (ROOT, DATA_DIR, UPLOAD_DIR, CHROMA_DIR):
+    for folder in (ROOT, DATA_DIR, UPLOAD_DIR, CHROMA_DIR):
         folder_rows.append({
-            "Path": str(path),
-            "Exists": path.exists(),
-            "Is folder": path.is_dir(),
-            "Is file": path.is_file(),
+            "Path": str(folder),
+            "Exists": folder.exists(),
+            "Directory": folder.is_dir(),
         })
 
+    st.markdown("### Workspace folders")
     st.dataframe(
         pd.DataFrame(folder_rows),
         use_container_width=True,
         hide_index=True,
     )
 
-    st.markdown("### Python environment")
-
+    st.markdown("### Runtime")
     st.code(
-        f"Python executable: {sys.executable}\n"
-        f"Python version: {sys.version.split()[0]}\n"
+        f"Python: {__import__('sys').version.split()[0]}\n"
         f"Project root: {ROOT}\n"
-        f"Working directory: {Path.cwd()}"
+        f"Upload directory: {UPLOAD_DIR}\n"
+        f"Chroma directory: {CHROMA_DIR}"
     )
 
-    st.markdown("### RAG pipeline constructor")
-
+    st.markdown("### Pipeline constructor")
     try:
         st.code(str(inspect.signature(RAGPipeline)))
     except Exception as exc:
-        st.error(f"Could not inspect constructor: {exc}")
+        st.error(f"Could not inspect RAGPipeline: {exc}")
 
-    st.markdown("### Pipeline test")
-
-    if st.button("Test pipeline initialization", type="primary"):
+    if st.button(
+        "Test local RAG pipeline",
+        type="primary",
+        use_container_width=True,
+    ):
         pipeline = get_pipeline_safely()
 
         if pipeline is not None:
             st.success("RAGPipeline initialized successfully.")
-            st.caption(
-                "Ingestion and search still need to be tested separately."
+
+            stats_method = getattr(
+                pipeline,
+                "get_dashboard_stats",
+                None,
             )
 
-    st.markdown("### Upload directory")
+            if callable(stats_method):
+                try:
+                    st.markdown("### Knowledge base statistics")
+                    st.json(stats_method())
+                except Exception as exc:
+                    st.warning(
+                        "The pipeline initialized, but statistics "
+                        f"could not be loaded: {exc}"
+                    )
 
-    stored_files = list_uploaded_files()
+    st.markdown("### Uploaded file inventory")
+    files = list_uploaded_files()
 
-    if stored_files:
+    if files:
         st.dataframe(
             pd.DataFrame([
                 {
                     "Filename": path.name,
                     "Size": human_size(path.stat().st_size),
+                    "Extension": path.suffix.lower(),
                 }
-                for path in stored_files
+                for path in files
             ]),
             use_container_width=True,
             hide_index=True,
         )
     else:
-        st.info("No uploaded files found.")
+        st.info("No uploaded files are currently stored.")
 
 
 # =========================================================
-# 13. FOOTER
+# 15. FOOTER
 # =========================================================
 
-st.divider()
+st.markdown("---")
 
-st.caption(
-    "AI Project Intelligence & Risk Advisor | "
-    "Infosys Springboard Internship Project | "
-    "Local-first document intelligence"
+st.markdown(
+    """
+    <div class="footer">
+        AI Project Intelligence &amp; Risk Advisor
+        &nbsp; • &nbsp; Infosys Springboard Internship Project
+        <br>
+        Local-first document intelligence and project risk analysis
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
