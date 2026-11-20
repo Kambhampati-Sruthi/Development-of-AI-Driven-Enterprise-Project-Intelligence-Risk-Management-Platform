@@ -77,6 +77,9 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 │ 5. DELIVERABLES, HEALTH & STREAMLIT UI (docgen, health, report, ui/)       │
 │    • Weighted Health Scoring · Heat Maps · DOCX/XLSX/CSV Exports           │
 └────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## ⚙️ How the Intelligence Pipeline Works
 
@@ -111,32 +114,60 @@ docs/                   TECHNICAL_DOCUMENTATION.md · DEMO_SCRIPT.md · TEST_REP
 .streamlit/config.toml  Theme and server settings
 requirements.txt        Core production dependencies
 requirements-dev.txt    Development & testing dependencies (pytest)
+```
 
-🚀 Quick Start
-Option 1: Try the Live App
-Open https://projectintelligence.streamlit.app/ in your browser.
+---
 
-Go to Knowledge Base in the left sidebar and drop in your files.
+## 🚀 Quick Start
 
-They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
+### Option 1: Try the Live App
+1. Open [https://projectintelligence.streamlit.app/](https://projectintelligence.streamlit.app/) in your browser.
+2. Go to **Knowledge Base** in the left sidebar and drop in your files.
+3. They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
 
-Option 2: Run Locally
-git clone https://github.com/Kambhampati-Sruthi/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git
+### Option 2: Run Locally
+
+```bash
+git clone [https://github.com/Kambhampati-Sruthi/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git](https://github.com/Kambhampati-Sruthi/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git)
 cd Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform
 
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
-Open the URL Streamlit prints (usually http://localhost:8501), go to Knowledge Base and drop in your files. They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
+```
+
+Open the URL Streamlit prints (usually `http://localhost:8501`), go to **Knowledge Base** and drop in your files. They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
+
+```bash
 pip install -r requirements-dev.txt && pytest -q  # end-to-end tests
+```
 
-🧪 Testing & Validation
+Legacy `.xls` files are read with `xlrd` (included in `requirements.txt`). If it is unavailable, the app falls back to LibreOffice conversion (if installed), then to HTML/CSV sniffing, and finally reports a clear error.
+
+---
+
+## 🧠 Optional LLM Answer Synthesis
+
+The assistant is fully functional without any API key. To let an LLM phrase answers (still restricted to the retrieved, numbered excerpts):
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY=your_key  # or add it to .streamlit/secrets.toml
+```
+
+---
+
+## 🧪 Testing & Validation
+
+```bash
 pip install -r requirements-dev.txt && pytest -q
+```
 
-🛠️ Troubleshooting
-Scanned PDF → “No text layer found”: run OCR first.
+---
 
-Nothing retrieved → use the Retrieval explorer in Knowledge Base to see what matches a query.
+## 🛠️ Troubleshooting
 
-Re-analyse after editing files: upload the new version (same name replaces the old one) or press Re-run
+- **Scanned PDF** → “No text layer found”: run OCR first.
+- **Nothing retrieved** → use the **Retrieval explorer** in Knowledge Base to see what matches a query.
+- **Re-analyse** after editing files: upload the new version (same name replaces the old one) or press **Re-run analysis**.
