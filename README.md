@@ -7,6 +7,7 @@ An enterprise-grade, multi-agent Streamlit platform that transforms scattered, u
 ---
 
 ## 📌 Table of Contents
+
 1. [Problem Statement & Solution](#-problem-statement--solution)
 2. [Key Features & Modules](#-key-features--modules)
 3. [End-to-End System Architecture](#-end-to-end-system-architecture)
@@ -35,7 +36,7 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 
 | Tab | Purpose |
 | :--- | :--- |
-| **Dashboard** | Ask-the-assistant bar, KPI cards, executive summary, health gauge, risk landscape (category chart + probability×impact heat map), top risks, blockers/decisions, timeline, ownership |
+| **Dashboard** | Ask-the-assistant bar, KPI cards, executive summary, health gauge, risk landscape (category chart + probability × impact heat map), top risks, blockers/decisions, timeline, ownership |
 | **Knowledge Base** | Multi-format *incremental* upload (`PDF`, `DOCX`, `CSV`, `XLS/XLSX`, `TXT/MD`), update summaries, ingestion log, per-document stats, remove/clear, retrieval explorer |
 | **Agent Center** | Four agents (**Scope**, **Risk & Forecast**, **Blocker & Action**, and **Orchestrator**) with status/timing and full outputs, plus a **Validation** view (per-format coverage, retrieval self-test) |
 | **Generated Docs** | User stories, scored risk register, action items, **Word/Markdown project report**; export to Excel / CSV |
@@ -46,7 +47,7 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 
 ## 🏗️ End-to-End System Architecture
 
-
+```text
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                         Multi-Format Project Artifacts                     │
 │        (PDF · DOCX · CSV · XLS/XLSX · TXT/MD — Briefs, Backlogs, Logs)     │
@@ -77,13 +78,13 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 │    • Weighted Health Scoring · Heat Maps · DOCX/XLSX/CSV Exports           │
 └────────────────────────────────────────────────────────────────────────────┘
 ⚙️ How the Intelligence Pipeline Works
-RAG uses a deterministic TF-IDF vector space (word uni+bi-grams, light stemming, domain query expansion). It runs fully offline with no model download. Chunk size, overlap and top-k are fixed constants in core/config.py.
+RAG uses a deterministic TF-IDF vector space (word uni+bi-grams, light stemming, domain query expansion). It runs fully offline with no model download. Chunk size, overlap, and top-k are fixed constants in core/config.py.
 
-Agents are evidence-based. Every finding carries its document and location. Findings derived from structural gaps (e.g. no owners, dense phases) are labelled Inferred; those stated in documents are Detected.
+Agents are evidence-based. Every finding carries its document and location. Findings derived from structural gaps (e.g., no owners, dense phases) are labelled Inferred; those stated in documents are Detected.
 
-Tracker awareness. Sprint backlogs (planned vs actual sprint, dependencies, status), defect trackers (open/closed, owner, remarks), unit test plans (expected vs actual results) and stand-up/retrospective sheets are interpreted natively.
+Tracker awareness. Sprint backlogs (planned vs. actual sprint, dependencies, status), defect trackers (open/closed, owner, remarks), unit test plans (expected vs. actual results), and stand-up/retrospective sheets are interpreted natively.
 
-Resilience. Each file, the index build, each agent, each view and each assistant answer is isolated by exception handling; one failure never takes down the rest. Vector-index failure degrades to keyword retrieval.
+Resilience. Each file, the index build, each agent, each view, and each assistant answer is isolated by exception handling; one failure never takes down the rest. Vector-index failure degrades to keyword retrieval.
 
 📁 Project Structure
 app.py                  Streamlit entry point (sidebar navigation, error boundaries)
@@ -107,6 +108,7 @@ docs/                   TECHNICAL_DOCUMENTATION.md · DEMO_SCRIPT.md · TEST_REP
 .streamlit/config.toml  Theme and server settings
 requirements.txt        Core production dependencies
 requirements-dev.txt    Development & testing dependencies (pytest)
+
 🚀 Quick Start
 Option 1: Try the Live App
 Open https://projectintelligence.streamlit.app/ in your browser.
@@ -125,8 +127,14 @@ pip install -r requirements.txt
 streamlit run app.py
 Open the URL Streamlit prints (usually http://localhost:8501), go to Knowledge Base and drop in your files. They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
 
+pip install -r requirements-dev.txt && pytest -q  # end-to-end tests
 
-pip install -r requirements-dev.txt && pytest -q
 🧪 Testing & Validation
-
 pip install -r requirements-dev.txt && pytest -q
+
+🛠️ Troubleshooting
+Scanned PDF → “No text layer found”: run OCR first.
+
+Nothing retrieved → use the Retrieval explorer in Knowledge Base to see what matches a query.
+
+Re-analyse after editing files: upload the new version (same name replaces the old one) or press Re-run analysis.
