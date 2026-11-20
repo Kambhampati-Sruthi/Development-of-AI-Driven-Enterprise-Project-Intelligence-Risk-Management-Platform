@@ -77,17 +77,19 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 │ 5. DELIVERABLES, HEALTH & STREAMLIT UI (docgen, health, report, ui/)       │
 │    • Weighted Health Scoring · Heat Maps · DOCX/XLSX/CSV Exports           │
 └────────────────────────────────────────────────────────────────────────────┘
+
+## ⚙️ How the Intelligence Pipeline Works
+
+- **RAG** uses a deterministic TF-IDF vector space (word uni+bi-grams, light stemming, domain query expansion). It runs fully offline with no model download. Chunk size, overlap, and top-k are fixed constants in `core/config.py`.
+- **Agents are evidence-based.** Every finding carries its document and location. Findings derived from structural gaps (e.g., no owners, dense phases) are labelled **Inferred**; those stated in documents are **Detected**.
+- **Tracker awareness.** Sprint backlogs (planned vs. actual sprint, dependencies, status), defect trackers (open/closed, owner, remarks), unit test plans (expected vs. actual results), and stand-up/retrospective sheets are interpreted natively.
+- **Resilience.** Each file, the index build, each agent, each view, and each assistant answer is isolated by exception handling; one failure never takes down the rest. Vector-index failure degrades to keyword retrieval.
+
+---
+
+## 📁 Project Structure
+
 ```text
-⚙️ How the Intelligence Pipeline Works
-RAG uses a deterministic TF-IDF vector space (word uni+bi-grams, light stemming, domain query expansion). It runs fully offline with no model download. Chunk size, overlap, and top-k are fixed constants in core/config.py.
-
-Agents are evidence-based. Every finding carries its document and location. Findings derived from structural gaps (e.g., no owners, dense phases) are labelled Inferred; those stated in documents are Detected.
-
-Tracker awareness. Sprint backlogs (planned vs. actual sprint, dependencies, status), defect trackers (open/closed, owner, remarks), unit test plans (expected vs. actual results), and stand-up/retrospective sheets are interpreted natively.
-
-Resilience. Each file, the index build, each agent, each view, and each assistant answer is isolated by exception handling; one failure never takes down the rest. Vector-index failure degrades to keyword retrieval.
-
-📁 Project Structure
 app.py                  Streamlit entry point (sidebar navigation, error boundaries)
 core/
   config.py             Fixed RAG defaults, scoring weights, optional LLM settings
@@ -119,7 +121,7 @@ Go to Knowledge Base in the left sidebar and drop in your files.
 They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
 
 Option 2: Run Locally
-git clone [https://github.com/Kambhampati-Sruthi/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git](https://github.com/Kambhampati-Sruthi/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git)
+git clone https://github.com/Kambhampati-Sruthi/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git
 cd Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform
 
 python -m venv .venv
@@ -127,7 +129,6 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 Open the URL Streamlit prints (usually http://localhost:8501), go to Knowledge Base and drop in your files. They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
-
 pip install -r requirements-dev.txt && pytest -q  # end-to-end tests
 
 🧪 Testing & Validation
@@ -138,4 +139,4 @@ Scanned PDF → “No text layer found”: run OCR first.
 
 Nothing retrieved → use the Retrieval explorer in Knowledge Base to see what matches a query.
 
-Re-analyse after editing files: upload the new version (same name replaces the old one) or press Re-run analysis.
+Re-analyse after editing files: upload the new version (same name replaces the old one) or press Re-run
