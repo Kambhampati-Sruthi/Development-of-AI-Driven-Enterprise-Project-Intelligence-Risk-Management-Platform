@@ -77,6 +77,7 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 │ 5. DELIVERABLES, HEALTH & STREAMLIT UI (docgen, health, report, ui/)       │
 │    • Weighted Health Scoring · Heat Maps · DOCX/XLSX/CSV Exports           │
 └────────────────────────────────────────────────────────────────────────────┘
+```text
 ⚙️ How the Intelligence Pipeline Works
 RAG uses a deterministic TF-IDF vector space (word uni+bi-grams, light stemming, domain query expansion). It runs fully offline with no model download. Chunk size, overlap, and top-k are fixed constants in core/config.py.
 
@@ -138,4 +139,3 @@ Scanned PDF → “No text layer found”: run OCR first.
 Nothing retrieved → use the Retrieval explorer in Knowledge Base to see what matches a query.
 
 Re-analyse after editing files: upload the new version (same name replaces the old one) or press Re-run analysis.
-```text
