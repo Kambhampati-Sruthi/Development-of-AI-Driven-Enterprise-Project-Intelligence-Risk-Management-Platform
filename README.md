@@ -138,3 +138,4 @@ Scanned PDF → “No text layer found”: run OCR first.
 Nothing retrieved → use the Retrieval explorer in Knowledge Base to see what matches a query.
 
 Re-analyse after editing files: upload the new version (same name replaces the old one) or press Re-run analysis.
+```text
