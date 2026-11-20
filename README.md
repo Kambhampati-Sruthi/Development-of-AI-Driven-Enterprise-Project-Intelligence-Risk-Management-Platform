@@ -46,7 +46,7 @@ Navigation is powered by a persistent left sidebar (the page you are on is kept 
 
 ## 🏗️ End-to-End System Architecture
 
-```text
+
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                         Multi-Format Project Artifacts                     │
 │        (PDF · DOCX · CSV · XLS/XLSX · TXT/MD — Briefs, Backlogs, Logs)     │
@@ -125,8 +125,8 @@ pip install -r requirements.txt
 streamlit run app.py
 Open the URL Streamlit prints (usually http://localhost:8501), go to Knowledge Base and drop in your files. They are indexed automatically and every agent runs; add more files at any time and the knowledge base updates incrementally.
 
-Bash
+
 pip install -r requirements-dev.txt && pytest -q
 🧪 Testing & Validation
-Bash
+
 pip install -r requirements-dev.txt && pytest -q
